@@ -27,6 +27,11 @@ EnableStackPointerTest("stk-ptr-tst", cl::Hidden,
                       cl::desc("Enable Stack pointer test."),
                       cl::init(false));
 
+cl::opt<bool>
+EnableStackManager("stk-mgr", cl::Hidden,
+                       cl::desc("Enable Stack Management functions."),
+                       cl::init(false));
+
 extern "C" void LLVMInitializeX86Target() {
   // Register the target.
   RegisterTargetMachine<X86TargetMachine> X(TheX86_32Target);
@@ -177,6 +182,10 @@ bool X86PassConfig::addPreRegAlloc() {
     if (EnableStackPointerTest)
     {
         addPass(createStackPointerTester(getX86TargetMachine()));
+    }
+    if (EnableStackManager)
+    {
+        addPass(createStackManager(getX86TargetMachine()));
     }
   return false;  // -print-machineinstr shouldn't print after this.
 }

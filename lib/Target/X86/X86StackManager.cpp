@@ -50,7 +50,7 @@ namespace llvm
         
         bool compareCallToFunctionNames(std::string function_name)
         {
-            std::string function_names[] = {"__sstore", "__sload", "__g2l", "__l2g", "xe_printf"};
+            std::string function_names[] = {"__sstore", "__sload", "__g2l", "__l2g"};
             for (int i = 0; i < 5; i++)
             {
                 if (function_names[i].compare(function_name) == 0)
@@ -83,18 +83,18 @@ namespace llvm
                         if ( !compareCallToFunctionNames(funcName) )
                         {
                             //Get Target Info to generate instructions
-                            const TargetMachine &TM = MF.getTarget();
+                            const TargetSubtargetInfo &TM = MF.getSubtarget();
                             const TargetInstrInfo *TII = TM.getInstrInfo();
                             MachineBasicBlock::instr_iterator I = bItr->instr_begin();
                             DebugLoc DL3 = bItr->findDebugLoc(I);
                             
                             //Generate two additional function call instructions
-                            MachineInstrBuilder sstoreInst =  llvm::BuildMI  (MF, DL3, TII->get(X86::JMP)).addExternalSymbol("__sstore");
-                            MachineInstrBuilder sloadInst =  llvm::BuildMI  (MF, DL3, TII->get(X86::JMP)).addExternalSymbol("__sload");
+//                            MachineInstrBuilder sstoreInst =  llvm::BuildMI(MF, DL3, TII->get(X86::CALL32r)).addExternalSymbol("__sstore");
+//                            MachineInstrBuilder sloadInst =  llvm::BuildMI(MF, DL3, TII->get(X86::CALL32r)).addExternalSymbol("__sload");
                             
                             //Insert one instruction before and one instruction after the function call.
-                            bItr->insert(iItr, sstoreInst);
-                            bItr->insertAfter(iItr++, sloadInst);
+//                            bItr->insert(iItr, sstoreInst);
+//                            bItr->insertAfter(iItr++, sloadInst);
                         }
                     }
                 }

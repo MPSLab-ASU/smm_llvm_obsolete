@@ -68,6 +68,8 @@ FunctionPass *createX86PadShortFunctions();
 FunctionPass *createX86FixupLEAs();
     
 FunctionPass *createStackPointerTester(X86TargetMachine &TM);
+    
+FunctionPass *createStackManager(X86TargetMachine &TM);
 
 } // End llvm namespace
 
