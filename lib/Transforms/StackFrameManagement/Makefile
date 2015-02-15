@@ -8,7 +8,7 @@
 ##===----------------------------------------------------------------------===##
 
 LEVEL = ../../..
-LIBRARYNAME = LLVMStackManager
+LIBRARYNAME = LLVMStackFrameManager
 LOADABLE_MODULE = 1
 USEDLIBS =
 
