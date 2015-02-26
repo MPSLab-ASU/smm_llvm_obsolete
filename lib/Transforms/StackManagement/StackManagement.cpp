@@ -31,6 +31,25 @@ namespace {
 		StackManagerPass() : ModulePass(ID) {
 		}
 
+		// Checks whether a function is a library function (including intrinsic functions)
+		inline bool isLibraryFunction(Function *func) {
+			return (func->begin() == func->end());
+		}
+
+		// Check if a function is stack management function	
+		inline bool isManagementFunction(Function *func)
+		{
+			if (func->getName().count("_g2l") ==1)
+				return true;
+			if (func->getName().count("_l2g") ==1)
+				return true;
+			if (func->getName().count("_sstore") ==1)
+				return true;
+			if (func->getName().count("_sload") ==1)
+				return true;
+			return false;
+		}	
+
 		virtual bool runOnModule(Module &mod) {
 			LLVMContext &context = mod.getContext();
 
@@ -45,7 +64,16 @@ namespace {
 					call_args, // Params
 					false); //isVarArg
 
+			// External Variables
+			GlobalVariable* gvar_spm_end = new GlobalVariable(mod, // Module
+					IntegerType::get(context, 8), //Type
+					false, //isConstant
+					GlobalValue::ExternalLinkage, // Linkage
+					0, // Initializer
+					"_spm_end");
+
 			// Global Variables
+			GlobalVariable* gvar_mem_stack_base = mod.getGlobalVariable("_mem_stack_base");
 			GlobalVariable* gvar_spm_stack_base = mod.getGlobalVariable("_spm_stack_base");
 			GlobalVariable* gvar_spm_depth = mod.getGlobalVariable("_stack_depth");
 			GlobalVariable* gvar_stack = mod.getGlobalVariable("_stack");
@@ -55,15 +83,23 @@ namespace {
 			Function *func_l2g = mod.getFunction("_l2g");
 			Function *func_sstore = mod.getFunction("_sstore");
 			Function *func_sload = mod.getFunction("_sload");
+			Function *func_main = mod.getFunction("main");
+
+			// Inline Assembly
+			InlineAsm *func_putSP = InlineAsm::get(functy_inline_asm, "mov $0, %rsp;", "*m,~{rsp},~{dirflag},~{fpsr},~{flags}",true);
+			InlineAsm *func_getSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}",true);
 
 			// Transform the functions with address arguments to pass pointers instead
 			for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 				Function *caller = &*fi;
-				//TODO: Ignore library functions
-				if (caller->getName() != "f1" && caller->getName() != "f2" && caller->getName() != "f3")
+				// Ignore library functions
+				if (isLibraryFunction(caller))
 					continue;
 				// Ignore stack management functions
-				if (caller == func_g2l || caller == func_l2g || caller == func_sstore || caller == func_sload)
+				if (isManagementFunction(caller))
+					continue;
+				// Ignore main function
+				if (&*fi == func_main)
 					continue;
 				// We have found an user function
 				for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
@@ -73,6 +109,10 @@ namespace {
 							// Ignore inline asm
 							if (funcCall->isInlineAsm())
 								continue;
+							//Function *callee = funcCall->getCalledFunction();
+							// Ignore stack management function calls
+							//if (isManagementFunction(callee))
+								//continue;
 							for (unsigned int i = 0, n = funcCall->getNumArgOperands(); i < n; i++) { // We have found function calls wth address arguments
 								Value *operand = funcCall->getArgOperand(i);
 								if (operand->getType()->isPointerTy() ) {
@@ -85,26 +125,41 @@ namespace {
 									LoadInst *ptrval = new LoadInst(ptr, "", inst);
 									funcCall->setOperand(i, ptrval);
 								}
-
 							}
 						}
 					}
 				}
 			}
 
+			/*
+			for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+				if (fi->getName() != "f4") continue;
+				for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
+					for (BasicBlock::iterator in = bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
+					//for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
+						errs() << "\t" << *ii << "\n";
+					}
+				}
+			}
+			*/
 
 			// Insert l2g and g2l function
 			for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 				Function *caller = &*fi;
-				// TODO: Ignore library functions
-				if (caller->getName() != "f1" && caller->getName() != "f2" && caller->getName() != "f3")
+				// Ignore library functions
+				if (isLibraryFunction(caller))
 					continue;
 				// Ignore stack management functions
-				if (caller == func_g2l || caller == func_l2g || caller == func_sstore || caller == func_sload)
+				if (isManagementFunction(caller))
 					continue;
+				// Ignore main function
+				if (&*fi == func_main)
+					continue;
+				//if (fi->getName() == "f4") 
+					//errs() << "f4:\n";
 				// We have found an user function
 				for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
-					for (BasicBlock::iterator ii = bi->begin(), in=++ii, ie = bi->end(); ii != ie; ii = in, in++) {
+					for (BasicBlock::iterator in=bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
 						Instruction *inst = ii;
 						Instruction *nextInst = in;
 						ii = inst;
@@ -160,14 +215,17 @@ namespace {
 			for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 				for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
 					Function *caller = &*fi;
-					//TODO: Ignore library functions
-					if (caller->getName() != "f1" && caller->getName() != "f2" && caller->getName() != "f3")
+					//Ignore library functions
+					if (isLibraryFunction(caller))
 						continue;
 					// Ignore stack management functions
-					if (caller == func_g2l || caller == func_l2g || caller == func_sstore || caller == func_sload)
+					if (isManagementFunction(caller))
+						continue;
+					// Ignore main function
+					if (&*fi == func_main)
 						continue;
 					// We have found an user function
-					for (BasicBlock::iterator ii = bi->begin(), in = ++ii, ie = bi->end(); ii != ie; ii = in, in++) {
+					for (BasicBlock::iterator in = bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
 						Instruction *inst = ii;
 						Instruction *nextInst = in;
 						ii = inst;
@@ -178,13 +236,12 @@ namespace {
 							// We found a function call
 							Function *callee = funcCall->getCalledFunction();
 							// Ignore it if the callee is a management function
-							if (callee == func_g2l || callee == func_l2g || callee == func_sstore || callee == func_sload)
+							if (isManagementFunction(callee))
 								continue;
 							// Before the function call
 							//	Insert a sstore function
 							CallInst::Create(func_sstore, "", inst);
 							// 	Insert putSP(_spm_stack_base)
-							InlineAsm* func_putSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}", true);
 							CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst);
 							// After the function call
 							// 	Read value of _stack_depth after the function call
@@ -221,7 +278,7 @@ namespace {
 									//	if (gi->getName().count("_gvar") == 1 && gi->getType() == retty)
 									//		gvar = &*gi;
 									if(gvar == NULL) { 
-									// Always create a new global variable
+										// Always create a new global variable
 										gvar = new GlobalVariable(mod, //Module
 												retty, //Type
 												false, //isConstant
@@ -246,7 +303,27 @@ namespace {
 				}
 			}
 
+			// Insert starting code in main function
+			Instruction *entry = func_main->getEntryBlock().getFirstInsertionPt();
+			CallInst *getMemSP = CallInst::Create(func_getSP, gvar_mem_stack_base);
+			getMemSP->insertAfter(entry);
+			StoreInst *getSpmHigh = new StoreInst(gvar_spm_end, gvar_spm_stack_base);
+			getSpmHigh->insertAfter(getMemSP);
+			CallInst *setSpmSP=CallInst::Create(func_putSP, gvar_spm_stack_base); 
+			setSpmSP->insertAfter(getSpmHigh);
 
+			// Insert ending code in main function
+			for (Function::iterator bi = func_main->begin(), be = func_main->end(); bi != be; ++bi) {
+				for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
+					Instruction *inst  = &*ii;
+					if (inst->getOpcode() == Instruction::Ret) {
+						CallInst::Create(func_putSP, gvar_mem_stack_base, "", inst); 
+					}
+				}
+			}
+
+
+			// TODO: the main function needs to be renamed as an user function
 			return true;
 		}
 	};
