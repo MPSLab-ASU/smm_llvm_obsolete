@@ -91,7 +91,6 @@ namespace {
 	    InlineAsm *func_getSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}",true);
 
 	    // Step 1: transform the main function to an user function
-
 	    // Create an external function called smm_main
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    ValueToValueMapTy VMap;
@@ -144,8 +143,7 @@ namespace {
 	    }
 
 
-
-	    // Step2: Transform the functions with address arguments to pass pointers instead
+	    // Step 2: Transform the functions with address arguments to pass pointers instead
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		// Ignore library functions
@@ -166,6 +164,9 @@ namespace {
 			    if (funcCall->isInlineAsm())
 				continue;
 			    Function *callee = funcCall->getCalledFunction();
+			    //Continue if library management functions are called
+			    //if (isLibraryFunction(callee))
+				//continue;
 			    //Continue if stack management functions are called
 			    if (isManagementFunction(callee))
 				continue;
@@ -187,7 +188,7 @@ namespace {
 		}
 	    }
 
-	    // Step3: Insert l2g and g2l function
+	    // Step 3: Insert l2g and g2l function
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		// Ignore library functions
@@ -255,7 +256,6 @@ namespace {
 
 	    // Step 4: Insert management functions
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
 		    Function *caller = &*fi;
 		    //errs() << caller << " : " <<caller->getName() << " is " << (isLibraryFunction(caller)? "a": "not a") << " library function,";
 		    //errs() << " is " << (isManagementFunction(caller)?"a":"not a") << " management function,";
@@ -270,7 +270,8 @@ namespace {
 		    if (&*fi == func_main)
 			continue;
 		    // We have found an user function (including main function)
-		    for (BasicBlock::iterator in = bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
+		    for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
+			for (BasicBlock::iterator in = bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
 			Instruction *inst = ii;
 			Instruction *nextInst = in;
 			ii = inst;
@@ -279,6 +280,9 @@ namespace {
 			    if (funcCall->isInlineAsm())
 				continue;
 			    Function *callee = funcCall->getCalledFunction();
+			    //Continue if library management functions are called
+			    //if (isLibraryFunction(callee))
+				//continue;
 			    // Ignore it if the callee is a management function
 			    if (isManagementFunction(callee))
 				continue;
@@ -314,28 +318,31 @@ namespace {
 				continue;
 			    unsigned int i, n;
 			    // Save the return value in a global variable temporarily until sload is executed if it is used
-			    for (i = 0, n = nextInst->getNumOperands(); i < n; i++)
-				if (nextInst->getOperand(i) == inst) { // We have found the use of the return value
-				    GlobalVariable *gvar = NULL;
-				    // Always create a new global variable
-				    gvar = new GlobalVariable(mod, //Module
-					    retty, //Type
-					    false, //isConstant
-					    GlobalValue::ExternalLinkage, //linkage
-					    0, // Initializer
-					    "_gvar"); //Name
-				    // Initialize the temporary global variable
-				    gvar->setInitializer(Constant::getNullValue(retty));
+			    for (BasicBlock::iterator  ij = &*nextInst; ij != ie; ij++)
+				for (i = 0, n = ij->getNumOperands(); i < n; i++)
+				    if (ij->getOperand(i) == inst) { // We have found the use of the return value
+					//if (caller->getName() == "smm_main" && callee->getName() == "f1")
+					//errs() << caller->getName() << " calls " <<callee->getName() << " is managed!\n";
+					GlobalVariable *gvar = NULL;
+					// Always create a new global variable
+					gvar = new GlobalVariable(mod, //Module
+						retty, //Type
+						false, //isConstant
+						GlobalValue::ExternalLinkage, //linkage
+						0, // Initializer
+						"_gvar"); //Name
+					// Initialize the temporary global variable
+					gvar->setInitializer(Constant::getNullValue(retty));
 
-				    // Save the return value to the global variable before sload is called
-				    StoreInst *stRetVal = new StoreInst(funcCall, gvar);
-				    stRetVal->insertAfter(inst);
-				    // Read the global variable before the use of the return value, after sload is excuted
-				    LoadInst *ldGvarVal = new LoadInst(gvar, "", nextInst);
-				    // Replace the return value with the value of global variable
-				    nextInst->setOperand(i, ldGvarVal);
-				    break;
-				} 
+					// Save the return value to the global variable before sload is called
+					StoreInst *stRetVal = new StoreInst(funcCall, gvar);
+					stRetVal->insertAfter(inst);
+					// Read the global variable before the use of the return value, after sload is excuted
+					LoadInst *ldGvarVal = new LoadInst(gvar, "", ij);
+					// Replace the return value with the value of global variable
+					ij->setOperand(i, ldGvarVal);
+					break;
+				    } 
 			}
 		    }
 		}
