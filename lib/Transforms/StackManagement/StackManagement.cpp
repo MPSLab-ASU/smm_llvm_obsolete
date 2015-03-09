@@ -355,5 +355,5 @@ namespace {
 }
 
 char StackManagerPass::ID = 0; //Id the pass.
-static RegisterPass<StackManagerPass> X("smm-stack", "Stack Management Pass"); //Register the pass.
+static RegisterPass<StackManagerPass> X("smmstack", "Stack Management Pass"); //Register the pass.
 
