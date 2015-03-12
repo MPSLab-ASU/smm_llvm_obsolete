@@ -174,7 +174,17 @@ namespace {
 				Value *operand = funcCall->getArgOperand(i);
 				if (operand->getType()->isPointerTy() ) {
 				    // Create a pointer variable for each address argument
-				    AllocaInst* ptr = new AllocaInst(operand->getType(), "ptr", inst);
+				    //AllocaInst* ptr = new AllocaInst(operand->getType(), "ptr", inst);
+				    // Always create a new global variable
+				    GlobalVariable *ptr = new GlobalVariable(mod, //Module
+					    operand->getType(), //Type
+					    false, //isConstant
+					    GlobalValue::ExternalLinkage, //linkage
+					    0, // Initializer
+					    "_ptr"); //Name
+				    // Initialize the temporary global variable
+				    //gvar->setInitializer(Constant::getNullValue(retty));
+				    ptr->setInitializer(Constant::getNullValue(operand->getType()));
 				    //errs() << "inst: " << *inst << " operand: "<< *operand << "\n"; 
 				    // Assign the pointer with the address
 				    new StoreInst(operand, ptr, inst);
