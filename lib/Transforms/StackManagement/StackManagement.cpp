@@ -15,6 +15,8 @@
 #include "llvm/Pass.h"
 #include "llvm/PassManager.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -146,36 +148,31 @@ namespace {
 	    // Step 2: Transform the functions with address arguments to pass pointers instead
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
-		// Ignore library functions
+		// Skip if it is a library function
 		if (isLibraryFunction(caller))
 		    continue;
-		// Ignore stack management functions
+		// Skip if it is a stack management function
 		if (isManagementFunction(caller))
 		    continue;
-		// Ignore main function
+		// Skip if it is main function
 		if (&*fi == func_main)
 		    continue;
 		// We have found an user function (including main function)
 		for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
 		    for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
 			Instruction *inst = ii;
-			if (CallInst *funcCall = dyn_cast<CallInst>(inst)) {
-			    // Continue if inline asm is called
-			    if (funcCall->isInlineAsm())
+			if (CallInst *call_func = dyn_cast<CallInst>(inst)) {
+			    // Skip if an inline asm is called
+			    if (call_func->isInlineAsm())
 				continue;
-			    Function *callee = funcCall->getCalledFunction();
-			    //Continue if library management functions are called
-			    //if (isLibraryFunction(callee))
-				//continue;
-			    //Continue if stack management functions are called
+			    Function *callee = call_func->getCalledFunction();
+			    //Skip if a stack management function is called
 			    if (isManagementFunction(callee))
 				continue;
-			    for (unsigned int i = 0, n = funcCall->getNumArgOperands(); i < n; i++) { // We have found function calls wth address arguments
-				Value *operand = funcCall->getArgOperand(i);
+			    for (unsigned int i = 0, n = call_func->getNumArgOperands(); i < n; i++) { // We have found function calls wth address arguments
+				Value *operand = call_func->getArgOperand(i);
 				if (operand->getType()->isPointerTy() ) {
-				    // Create a pointer variable for each address argument
-				    //AllocaInst* ptr = new AllocaInst(operand->getType(), "ptr", inst);
-				    // Always create a new global variable
+				    // Create a pointer variable for each address argument in global space
 				    GlobalVariable *ptr = new GlobalVariable(mod, //Module
 					    operand->getType(), //Type
 					    false, //isConstant
@@ -183,14 +180,12 @@ namespace {
 					    0, // Initializer
 					    "_ptr"); //Name
 				    // Initialize the temporary global variable
-				    //gvar->setInitializer(Constant::getNullValue(retty));
 				    ptr->setInitializer(Constant::getNullValue(operand->getType()));
-				    //errs() << "inst: " << *inst << " operand: "<< *operand << "\n"; 
 				    // Assign the pointer with the address
 				    new StoreInst(operand, ptr, inst);
 				    // Replace the address with corresponding pointer
 				    LoadInst *ptrval = new LoadInst(ptr, "", inst);
-				    funcCall->setOperand(i, ptrval);
+				    call_func->setOperand(i, ptrval);
 				}
 			    }
 			}
@@ -201,21 +196,20 @@ namespace {
 	    // Step 3: Insert l2g and g2l function
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
-		// Ignore library functions
+		// Skip if it is a library function
 		if (isLibraryFunction(caller))
 		    continue;
-		// Ignore stack management functions
+		// Skip if it is a stack management function
 		if (isManagementFunction(caller))
 		    continue;
-		// Ignore main function
+		// Skip if it is a main function
 		if (&*fi == func_main)
 		    continue;
-		// We have found an user function (including main function)
+		// We have found an user function
 		for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
 		    for (BasicBlock::iterator in=bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
 			Instruction *inst = ii;
-			Instruction *nextInst = in;
-			ii = inst;
+			Instruction *next_inst = in;
 
 			// Identify definition of pointers
 			if (inst->getOpcode() == Instruction::Store) {
@@ -241,22 +235,22 @@ namespace {
 			else if (inst->getOpcode() == Instruction::Load) {
 			    Value *operand0 = inst->getOperand(0);
 			    if (operand0->getType()->isPointerTy() && operand0->getType()->getPointerElementType()->isPointerTy()) {
-				if ( nextInst->getOpcode() == Instruction::Load && nextInst->getOperand(0) == inst) {
+				if ( next_inst->getOpcode() == Instruction::Load && next_inst->getOperand(0) == inst) {
 				    // We have found a dereference of a pointer.  The next instruction is a load instruction and the current instructions value is the operand for the next instruction.
-				    //errs() << fi->getName() << ": " << inst << " [" << *inst << "]\n\t is used in next instruction:[" << *nextInst <<"] as operand 0 " << nextInst->getOperand(0) << " ("<< *nextInst->getOperand(0) <<")\n";
-				    IRBuilder<> builder(nextInst);
+				    //errs() << fi->getName() << ": " << inst << " [" << *inst << "]\n\t is used in next instruction:[" << *next_inst <<"] as operand 0 " << next_inst->getOperand(0) << " ("<< *next_inst->getOperand(0) <<")\n";
+				    IRBuilder<> builder(next_inst);
 				    Value *castToCharStar = builder.CreatePointerCast(inst, Type::getInt8PtrTy(context), "castToChar*");
 				    Value *call_g2l = builder.CreateCall(func_g2l, castToCharStar, "call_g2l");
-				    Value *castFromCharStar = builder.CreatePointerCast(call_g2l, nextInst->getOperand(0)->getType(), "castFromChar*");
-				    nextInst->setOperand(0, castFromCharStar);
-				} else if (nextInst->getOpcode() == Instruction::Store && nextInst->getOperand(1) == inst) {
+				    Value *castFromCharStar = builder.CreatePointerCast(call_g2l, next_inst->getOperand(0)->getType(), "castFromChar*");
+				    next_inst->setOperand(0, castFromCharStar);
+				} else if (next_inst->getOpcode() == Instruction::Store && next_inst->getOperand(1) == inst) {
 				    // We have found a dereference of a pointer.  The next instruction is a store instruction and the current instructions value is the operand for the next instruction.
-				    //errs() << fi->getName() << ": " << inst << " [" << *inst << "]\n\t is used in next instruction:[" << *nextInst <<"] as operand 1 " << nextInst->getOperand(1) << " ("<< *nextInst->getOperand(1) <<")\n";
-				    IRBuilder<> builder(nextInst);
+				    //errs() << fi->getName() << ": " << inst << " [" << *inst << "]\n\t is used in next instruction:[" << *next_inst <<"] as operand 1 " << next_inst->getOperand(1) << " ("<< *next_inst->getOperand(1) <<")\n";
+				    IRBuilder<> builder(next_inst);
 				    Value *castToCharStar = builder.CreatePointerCast(inst, Type::getInt8PtrTy(context), "castToChar*");
 				    Value *call_g2l = builder.CreateCall(func_g2l, castToCharStar, "call_g2l");
-				    Value *castFromCharStar = builder.CreatePointerCast(call_g2l, nextInst->getOperand(1)->getType(), "castFromChar*");
-				    nextInst->setOperand(1, castFromCharStar);
+				    Value *castFromCharStar = builder.CreatePointerCast(call_g2l, next_inst->getOperand(1)->getType(), "castFromChar*");
+				    next_inst->setOperand(1, castFromCharStar);
 				}
 			    }
 			}
@@ -266,75 +260,67 @@ namespace {
 
 	    // Step 4: Insert management functions
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		    Function *caller = &*fi;
-		    //errs() << caller << " : " <<caller->getName() << " is " << (isLibraryFunction(caller)? "a": "not a") << " library function,";
-		    //errs() << " is " << (isManagementFunction(caller)?"a":"not a") << " management function,";
-		    //errs() << " is "  << ((caller == func_main )?"": "not") << " main function." << "\n";
-		    //Ignore library functions
-		    if (isLibraryFunction(caller))
-			continue;
-		    // Ignore stack management functions
-		    if (isManagementFunction(caller))
-			continue;
-		    // Ignore main function
-		    if (&*fi == func_main)
-			continue;
-		    // We have found an user function (including main function)
-		    for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
-			for (BasicBlock::iterator in = bi->begin(), ii=in++, ie = bi->end(); ii != ie; ii=in++) {
-			Instruction *inst = ii;
-			Instruction *nextInst = in;
-			ii = inst;
-			if (CallInst * funcCall = dyn_cast<CallInst>(inst)) { // We found a function call
-			    // Ignore inline asm
-			    if (funcCall->isInlineAsm())
-				continue;
-			    Function *callee = funcCall->getCalledFunction();
-			    //Continue if library management functions are called
-			    //if (isLibraryFunction(callee))
-				//continue;
-			    // Ignore it if the callee is a management function
-			    if (isManagementFunction(callee))
-				continue;
-			    // Before the function call
-			    //	Insert a sstore function
-			    CallInst::Create(func_sstore, "", inst);
-			    // 	Insert putSP(_spm_stack_base)
-			    CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst);
-			    // After the function call
-			    // 	Read value of _stack_depth after the function call
-			    LoadInst* val__spm_depth = new LoadInst(gvar_spm_depth, "", false, nextInst);
-			    ConstantInt* const_int32_0 = ConstantInt::get(context, APInt(32, StringRef("0"), 10));
-			    ConstantInt* const_int64_1 = ConstantInt::get(context, APInt(64, StringRef("1"), 10));
-			    // 	Calculate _stack_depth - 1
-			    BinaryOperator* val__spm_depth1 = BinaryOperator::Create(Instruction::Sub, val__spm_depth, const_int64_1, "sub", nextInst);
-			    // 	Get the address of _stack[_stack_depth-1]
-			    std::vector<Value*> ptr_arrayidx_indices;
-			    ptr_arrayidx_indices.push_back(const_int32_0);
-			    ptr_arrayidx_indices.push_back(val__spm_depth1);
-			    Instruction* ptr_arrayidx = GetElementPtrInst::Create(gvar_stack, ptr_arrayidx_indices, "arrayidx", nextInst);
-			    // 	Get the address of _stack[_stack_depth-1].spm_address
-			    std::vector<Value*> ptr_spm_addr_indices;
-			    ptr_spm_addr_indices.push_back(const_int32_0);
-			    ptr_spm_addr_indices.push_back(const_int32_0);
-			    Instruction* ptr_spm_addr = GetElementPtrInst::Create(ptr_arrayidx, ptr_spm_addr_indices, "spm_addr", nextInst);
-			    // 	Insert putSP(_stack[_stack_depth-1].spm_addr)
-			    CallInst::Create(func_putSP, ptr_spm_addr, "", nextInst);
-			    // 	Insert a corresponding sload function
-			    CallInst::Create(func_sload, "", nextInst);
-			    // Check if the function has return value
-			    Type * retty = funcCall->getType();
-			    if (retty->isVoidTy())
-				continue;
-			    unsigned int i, n;
-			    // Save the return value in a global variable temporarily until sload is executed if it is used
-			    for (BasicBlock::iterator  ij = &*nextInst; ij != ie; ij++)
-				for (i = 0, n = ij->getNumOperands(); i < n; i++)
-				    if (ij->getOperand(i) == inst) { // We have found the use of the return value
-					//if (caller->getName() == "smm_main" && callee->getName() == "f1")
-					//errs() << caller->getName() << " calls " <<callee->getName() << " is managed!\n";
-					GlobalVariable *gvar = NULL;
-					// Always create a new global variable
+		Function *caller = &*fi;
+		//Skip if it is a library function
+		if (isLibraryFunction(caller))
+		    continue;
+		// Skip if it is a stack management function
+		if (isManagementFunction(caller))
+		    continue;
+		// Ignore if it is main function
+		if (&*fi == func_main)
+		    continue;
+		// We have found an user function (including main function)
+		for (inst_iterator in = inst_begin(fi), ii=in++, ie = inst_end(fi); ii != ie; ii=in++) {
+		    Instruction *inst = &*ii;
+		    Instruction *next_inst = &*in;
+		    if (CallInst * call_func = dyn_cast<CallInst>(inst)) { // We found a function call
+			// Skip if a inline asm is called
+			if (call_func->isInlineAsm())
+			    continue;
+			Function *callee = call_func->getCalledFunction();
+			// Skip if a management function is called
+			if (isManagementFunction(callee))
+			    continue;
+			// Before the function call
+			//	Insert a sstore function
+			CallInst::Create(func_sstore, "", inst);
+			// 	Insert putSP(_spm_stack_base)
+			CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst);
+			// After the function call
+			// 	Read value of _stack_depth after the function call
+			LoadInst* val__spm_depth = new LoadInst(gvar_spm_depth, "", false, next_inst);
+			ConstantInt* const_int32_0 = ConstantInt::get(context, APInt(32, StringRef("0"), 10));
+			ConstantInt* const_int64_1 = ConstantInt::get(context, APInt(64, StringRef("1"), 10));
+			// 	Calculate _stack_depth - 1
+			BinaryOperator* val__spm_depth1 = BinaryOperator::Create(Instruction::Sub, val__spm_depth, const_int64_1, "sub", next_inst);
+			// 	Get the address of _stack[_stack_depth-1]
+			std::vector<Value*> ptr_arrayidx_indices;
+			ptr_arrayidx_indices.push_back(const_int32_0);
+			ptr_arrayidx_indices.push_back(val__spm_depth1);
+			Instruction* ptr_arrayidx = GetElementPtrInst::Create(gvar_stack, ptr_arrayidx_indices, "arrayidx", next_inst);
+			// 	Get the address of _stack[_stack_depth-1].spm_address
+			std::vector<Value*> ptr_spm_addr_indices;
+			ptr_spm_addr_indices.push_back(const_int32_0);
+			ptr_spm_addr_indices.push_back(const_int32_0);
+			Instruction* ptr_spm_addr = GetElementPtrInst::Create(ptr_arrayidx, ptr_spm_addr_indices, "spm_addr", next_inst);
+			// 	Insert putSP(_stack[_stack_depth-1].spm_addr)
+			CallInst::Create(func_putSP, ptr_spm_addr, "", next_inst);
+			// 	Insert a corresponding sload function
+			CallInst::Create(func_sload, "", next_inst);
+
+			// Check if the function has return value
+			Type * retty = call_func->getType();
+			if (retty->isVoidTy())
+			    continue;
+			// Save return value in a global variable temporarily until sload is executed if it is used
+			unsigned int i, n;
+			GlobalVariable *gvar = NULL; // Always create a new global variable in case of recursive functions
+			for (inst_iterator ij = in; ij != ie; ij++) {
+			    Instruction *sub_inst = &*ij;
+			    for (i = 0, n = sub_inst->getNumOperands(); i < n; i++) {
+				if (sub_inst->getOperand(i) == inst) { // We have found the use of return value
+				    if (!gvar) {
 					gvar = new GlobalVariable(mod, //Module
 						retty, //Type
 						false, //isConstant
@@ -343,16 +329,35 @@ namespace {
 						"_gvar"); //Name
 					// Initialize the temporary global variable
 					gvar->setInitializer(Constant::getNullValue(retty));
+					// Save return value to the global variable before sload is called
+					StoreInst *st_ret = new StoreInst(call_func, gvar);
+					st_ret->insertAfter(inst);
+				    }
 
-					// Save the return value to the global variable before sload is called
-					StoreInst *stRetVal = new StoreInst(funcCall, gvar);
-					stRetVal->insertAfter(inst);
-					// Read the global variable before the use of the return value, after sload is excuted
-					LoadInst *ldGvarVal = new LoadInst(gvar, "", ij);
-					// Replace the return value with the value of global variable
-					ij->setOperand(i, ldGvarVal);
-					break;
-				    } 
+				    if (PHINode *target = dyn_cast<PHINode>(sub_inst)) { // Return value is used in a phi instruction
+					for (unsigned i = 0; i < target->getNumIncomingValues(); i++) {
+					    if(dyn_cast<CallInst>(target->getIncomingValue(i))) {
+						//BasicBlock *bb = target->getIncomingBlock(i);
+						//errs() << "Before: " << fi->getName() << " : " << target->getParent()->getName() << " : "<< *target << "\n";
+						//errs() << "\t" << bb->getName() << " : " << *target->getIncomingValue(i) << "\n";
+						// Read the global variable
+						LoadInst *restore_ret = new LoadInst(gvar, "", target->getIncomingBlock(i)->getTerminator());
+						// Use read value
+						sub_inst->setOperand(i, restore_ret);
+						//errs() << "After: "<< fi->getName() << " : " << target->getParent()->getName() << " : "<< *target << "\n";
+						//errs() << "\t" << bb->getName() << " : " << *target->getIncomingValue(i) << "\n";
+					    }
+
+					}
+
+				    } else { // Return value is used in a non-phi instruction
+					// Read the global variable
+					LoadInst *restore_ret = new LoadInst(gvar, "", sub_inst);
+					// Use read value
+					sub_inst->setOperand(i, restore_ret);
+				    }
+				}
+			    }
 			}
 		    }
 		}
