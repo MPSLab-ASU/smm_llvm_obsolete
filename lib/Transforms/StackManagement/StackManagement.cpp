@@ -14,6 +14,7 @@
 
 #include "llvm/Pass.h"
 #include "llvm/PassManager.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
@@ -50,6 +51,10 @@ namespace {
 		return true;
 	    if (func->getName().count("_sload") ==1)
 		return true;
+	    if (func->getName().count("dma") ==1) {
+		return true;
+	    }
+
 	    return false;
 	}	
 
@@ -144,8 +149,15 @@ namespace {
 		}
 	    }
 
+	    // Step 2 : Add noinline attributes to functions
+	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
+			continue;
+		fi->addFnAttr(Attribute::NoInline);
+	    }
 
-	    // Step 2: Transform the functions with address arguments to pass pointers instead
+
+	    // Step 3: Transform the functions with address arguments to pass pointers instead
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		// Skip if it is a library function
@@ -193,7 +205,7 @@ namespace {
 		}
 	    }
 
-	    // Step 3: Insert l2g and g2l function
+	    // Step 4: Insert l2g and g2l function calls
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		// Skip if it is a library function
@@ -258,7 +270,7 @@ namespace {
 		}
 	    }
 
-	    // Step 4: Insert management functions
+	    // Step 5: Insert management functions
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		//Skip if it is a library function
@@ -282,6 +294,8 @@ namespace {
 			// Skip if a management function is called
 			if (isManagementFunction(callee))
 			    continue;
+			errs() << caller->getName() << " calls " << callee->getName() << "\n";
+
 			// Before the function call
 			//	Insert a sstore function
 			CallInst::Create(func_sstore, "", inst);
@@ -362,7 +376,6 @@ namespace {
 		    }
 		}
 	    }
-
 
 	    return true;
 	}
