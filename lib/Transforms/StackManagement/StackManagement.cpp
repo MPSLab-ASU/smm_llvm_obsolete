@@ -210,6 +210,60 @@ namespace {
 	    }
 
 	    // TODO: Step 4: Insert g2l function calls
+	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+		//errs() << fi->getName() << "\n";
+		Function *caller = &*fi;
+		// Skip if it is a library function
+		if (isLibraryFunction(caller))
+		    continue;
+		// Skip if it is a stack management function
+		if (isStackManagementFunction(caller))
+		    continue;
+		// Skip if it is main function
+		if (&*fi == func_main)
+		    continue;
+		errs() << fi->getName() << " has " << (fi->isVarArg() ? "variable": "fixed") << " number of arguments\n";
+		errs() << "\t" << *fi->getFunctionType() << "\n";
+		// We have found a user-defined function
+		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
+		    if (ai->getType()->isPointerTy()) { // We have found a pointer argument
+			errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
+			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
+			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { // Find an user instruction of the pointer argument
+				errs() << "\t\t" << *user_inst << "\n";
+				if (PHINode *target = dyn_cast<PHINode>(user_inst)) { // If the user instruction a phi instruction
+				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
+					if(target->getIncomingValue(i) == ai) { // Find the use of the pointer argument
+					    IRBuilder<> builder(target->getIncomingBlock(i)->getTerminator()); // Instruction will be inserted before this instruction
+					    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); // Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
+					    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer"); // Call the function l2g with the value with cast type
+					    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); // Cast the result back to be of the original type
+					    // Replace the use of pointer argument (At most one use in phi instruction)
+					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
+						if (user_inst->getOperand(j) == ai) {
+						    user_inst->setOperand(j, cast_from);
+						}
+					    }
+					}
+
+				    }
+				} else { // If the user instruction is not a phi instruction
+				    IRBuilder<> builder(user_inst); // Instruction will be inserted before this instruction
+				    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); // Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
+				    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer"); // Call the function l2g with the value with cast type
+				    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); // Cast the result back to be of the original type
+				    // Replace the uses of the pointer argument
+				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
+					if (user_inst->getOperand(i) == ai ) 
+					    user_inst->setOperand(i, cast_from); 
+				    }
+				}
+			    }
+			}
+		    }
+		}
+
+	    }
 
 
 	    // Step 5: Insert management functions
@@ -228,7 +282,7 @@ namespace {
 		for (inst_iterator in = inst_begin(fi), ii=in++, ie = inst_end(fi); ii != ie; ii=in++) {
 		    Instruction *inst = &*ii;
 		    Instruction *next_inst = &*in;
-		    if (CallInst * call_func = dyn_cast<CallInst>(inst)) { // We found a function call
+		    if (CallInst * call_func = dyn_cast<CallInst>(inst)) { // We have found a function call
 			// Skip if a inline asm is called
 			if (call_func->isInlineAsm())
 			    continue;
