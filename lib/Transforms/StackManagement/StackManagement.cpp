@@ -209,7 +209,7 @@ namespace {
 		}
 	    }
 
-	    // TODO: Step 4: Insert g2l function calls
+	    // Step 4: Insert g2l function calls
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		//errs() << fi->getName() << "\n";
 		Function *caller = &*fi;
@@ -222,15 +222,15 @@ namespace {
 		// Skip if it is main function
 		if (&*fi == func_main)
 		    continue;
-		errs() << fi->getName() << " has " << (fi->isVarArg() ? "variable": "fixed") << " number of arguments\n";
-		errs() << "\t" << *fi->getFunctionType() << "\n";
+		//errs() << fi->getName() << " has " << (fi->isVarArg() ? "variable": "fixed") << " number of arguments\n";
+		//errs() << "\t" << *fi->getFunctionType() << "\n";
 		// We have found a user-defined function
 		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
 		    if (ai->getType()->isPointerTy()) { // We have found a pointer argument
-			errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
+			//errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
 			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
 			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { // Find an user instruction of the pointer argument
-				errs() << "\t\t" << *user_inst << "\n";
+				//errs() << "\t\t" << *user_inst << "\n";
 				if (PHINode *target = dyn_cast<PHINode>(user_inst)) { // If the user instruction a phi instruction
 				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
 					if(target->getIncomingValue(i) == ai) { // Find the use of the pointer argument
