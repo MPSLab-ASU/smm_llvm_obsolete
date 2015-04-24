@@ -97,59 +97,8 @@ namespace {
 	    InlineAsm *func_putSP = InlineAsm::get(functy_inline_asm, "mov $0, %rsp;", "*m,~{rsp},~{dirflag},~{fpsr},~{flags}",true);
 	    InlineAsm *func_getSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}",true);
 
-	    // Step 1: transform the main function to an user-defined function
-	    // Create an external function called smm_main
-	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
-	    ValueToValueMapTy VMap;
-	    std::vector<Value*> args;
 
-	    // Set up the mapping between arguments of main to those of smm_main
-	    Function::arg_iterator ai_new = func_smm_main->arg_begin();
-	    for (Function::arg_iterator ai = func_main->arg_begin(), ae = func_main->arg_end(); ai != ae; ++ai) { 
-		ai_new->setName(ai->getName());
-		VMap[ai] = ai_new;
-		args.push_back(ai);
-		ai_new++;
-	    }
-	    // Copy the function body from main to smm_main
-	    SmallVector<ReturnInst*, 8> Returns;
-	    CloneFunctionInto(func_smm_main, func_main, VMap, true, Returns);
-
-	    // Delete all the basic blocks in main function
-	    std::vector<BasicBlock*> bb_list;
-	    for (Function::iterator bi = func_main->begin(), be = func_main->end();  bi!= be; ++bi) { 
-		for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ++ii) {
-		    ii->dropAllReferences(); //Make sure there are no uses of any instruction
-		} 
-		bb_list.push_back(bi);
-	    }
-	    for (unsigned int i = 0; i < bb_list.size(); ++i) {
-		bb_list[i]->eraseFromParent();
-	    }
-
-	    // Create the new body of main function which calls smm_main and return 0
-	    BasicBlock* entry_block = BasicBlock::Create(getGlobalContext(), "EntryBlock", func_main);
-	    IRBuilder<> builder(entry_block);
-	    builder.CreateCall(func_smm_main, args);
-	    Value *zero = builder.getInt32(0);
-	    builder.CreateRet(zero);
-
-	    // Insert starting and ending code in main function
-	    for (Function::iterator bi = func_main->begin(), be = func_main->end(); bi != be; ++bi) {
-		for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
-		    Instruction *inst  = &*ii;
-		    if (dyn_cast<CallInst>(inst)) {
-			CallInst::Create(func_getSP, gvar_mem_stack_base, "", inst);
-			new StoreInst(gvar_spm_end, gvar_spm_stack_base, "", inst);
-			CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst); 
-		    }
-		    else if (inst->getOpcode() == Instruction::Ret) {
-			CallInst::Create(func_putSP, gvar_mem_stack_base, "", inst); 
-		    }
-		}
-	    }
-
-	    // Step 2 : Add noinline attributes to functions
+	    // Step 1 : Add noinline attributes to functions
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
 		    continue;
@@ -157,7 +106,7 @@ namespace {
 	    }
 
 
-	    // Step 3: Insert l2g functions
+	    // Step 2: Insert g2l function calls
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		//errs() << fi->getName() << "\n";
 		Function *caller = &*fi;
@@ -169,6 +118,67 @@ namespace {
 		    continue;
 		// Skip main function
 		if (&*fi == func_main)
+		    continue;
+		// Process user-defined functions
+		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
+		    // Find user instructions of pointer arguments and replace the uses with the result of calling g2l on the arguments
+		    if (ai->getType()->isPointerTy()) { 
+			//errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
+			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
+			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { 
+				//errs() << "\t\t" << *user_inst << "\n";
+				// If the user instruction a phi instruction, insert g2l function on the incoming basic blocks
+				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
+				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
+					if(target->getIncomingValue(i) == ai) { 
+					    IRBuilder<> builder(target->getIncomingBlock(i)->getTerminator()); // Instruction will be inserted before this instruction
+					    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
+					    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
+					    // Call the function l2g with the value with cast type
+					    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
+					    // Cast the result back to be of the original type
+					    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result");
+					    // Replace the use of pointer argument (At most one use in phi instruction)
+					    /*
+					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
+						if (user_inst->getOperand(j) == ai) {
+						    user_inst->setOperand(j, cast_from);
+						}
+					    }
+					    */
+					    target->setOperand(i, cast_from);
+					}
+
+				    }
+				} else { // If the user instruction is not a phi instruction, insert g2l function before it
+				    IRBuilder<> builder(user_inst); // Instruction will be inserted before this instruction
+				    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
+				    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer");
+				    // Call the function l2g with the value with cast type
+				    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
+				    // Cast the result back to be of the original type
+				    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); 
+				    // Replace the uses of the pointer argument
+				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
+					if (user_inst->getOperand(i) == ai ) 
+					    user_inst->setOperand(i, cast_from); 
+				    }
+				}
+			    }
+			}
+		    }
+		}
+	    }
+
+	    // Step 3: Insert l2g functions
+	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+		//errs() << fi->getName() << "\n";
+		Function *caller = &*fi;
+		// Skip library functions
+		if (isLibraryFunction(caller))
+		    continue;
+		// Skip stack management functions
+		if (isStackManagementFunction(caller))
 		    continue;
 		// Process user-defined functions
 		for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
@@ -211,70 +221,8 @@ namespace {
 		}
 	    }
 
-	    // Step 4: Insert g2l function calls
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		//errs() << fi->getName() << "\n";
-		Function *caller = &*fi;
-		// Skip library functions
-		if (isLibraryFunction(caller))
-		    continue;
-		// Skip stack management functions
-		if (isStackManagementFunction(caller))
-		    continue;
-		// Skip main function
-		if (&*fi == func_main)
-		    continue;
-		// Process user-defined functions
-		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
-		    // Find user instructions of pointer arguments and replace the uses with the result of calling g2l on the arguments
-		    if (ai->getType()->isPointerTy()) { 
-			//errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
-			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
-			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { 
-				//errs() << "\t\t" << *user_inst << "\n";
-				// If the user instruction a phi instruction, insert g2l function on the incoming basic blocks
-				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
-				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-					if(target->getIncomingValue(i) == ai) { 
-					    IRBuilder<> builder(target->getIncomingBlock(i)->getTerminator()); // Instruction will be inserted before this instruction
-					    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-					    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-					    // Call the function l2g with the value with cast type
-					    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-					    // Cast the result back to be of the original type
-					    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result");
-					    // Replace the use of pointer argument (At most one use in phi instruction)
-					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
-						if (user_inst->getOperand(j) == ai) {
-						    user_inst->setOperand(j, cast_from);
-						}
-					    }
-					}
 
-				    }
-				} else { // If the user instruction is not a phi instruction, insert g2l function before it
-				    IRBuilder<> builder(user_inst); // Instruction will be inserted before this instruction
-				    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-				    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer");
-				    // Call the function l2g with the value with cast type
-				    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-				    // Cast the result back to be of the original type
-				    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); 
-				    // Replace the uses of the pointer argument
-				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-					if (user_inst->getOperand(i) == ai ) 
-					    user_inst->setOperand(i, cast_from); 
-				    }
-				}
-			    }
-			}
-		    }
-		}
-
-	    }
-
-
-	    // Step 5: Insert management functions
+	    // Step 4: Insert management functions
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		Function *caller = &*fi;
 		//Skip library functions
@@ -282,9 +230,6 @@ namespace {
 		    continue;
 		// Skip stack management functions
 		if (isStackManagementFunction(caller))
-		    continue;
-		// Skip main function
-		if (&*fi == func_main)
 		    continue;
 		// Process user-defined functions
 		for (inst_iterator in = inst_begin(fi), ii=in++, ie = inst_end(fi); ii != ie; ii=in++) {
@@ -363,11 +308,14 @@ namespace {
 					    // Read the global variable
 					    LoadInst *restore_ret = new LoadInst(gvar, "", target->getIncomingBlock(i)->getTerminator());
 					    // Find the use of return value and replace it (At most one use in phi instruction)
+					    /*
 					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
 						if (user_inst->getOperand(j) == call_func) {
 						    user_inst->setOperand(j, restore_ret);
 						}
 					    }
+					     */
+					    target->setOperand(i, restore_ret);
 					}
 
 				    }
@@ -383,6 +331,58 @@ namespace {
 				}
 			    }
 			}
+		    }
+		}
+	    }
+
+	    // Step 5: transform the main function to an user-defined function
+	    // Create an external function called smm_main
+	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
+	    ValueToValueMapTy VMap;
+	    std::vector<Value*> args;
+
+	    // Set up the mapping between arguments of main to those of smm_main
+	    Function::arg_iterator ai_new = func_smm_main->arg_begin();
+	    for (Function::arg_iterator ai = func_main->arg_begin(), ae = func_main->arg_end(); ai != ae; ++ai) { 
+		ai_new->setName(ai->getName());
+		VMap[ai] = ai_new;
+		args.push_back(ai);
+		ai_new++;
+	    }
+	    // Copy the function body from main to smm_main
+	    SmallVector<ReturnInst*, 8> Returns;
+	    CloneFunctionInto(func_smm_main, func_main, VMap, true, Returns);
+
+	    // Delete all the basic blocks in main function
+	    std::vector<BasicBlock*> bb_list;
+	    for (Function::iterator bi = func_main->begin(), be = func_main->end();  bi!= be; ++bi) { 
+		for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ++ii) {
+		    ii->dropAllReferences(); //Make sure there are no uses of any instruction
+		} 
+		bb_list.push_back(bi);
+	    }
+	    for (unsigned int i = 0; i < bb_list.size(); ++i) {
+		bb_list[i]->eraseFromParent();
+	    }
+
+	    // Create the new body of main function which calls smm_main and return 0
+	    BasicBlock* entry_block = BasicBlock::Create(getGlobalContext(), "EntryBlock", func_main);
+	    IRBuilder<> builder(entry_block);
+	    builder.CreateCall(func_smm_main, args);
+	    Value *zero = builder.getInt32(0);
+	    builder.CreateRet(zero);
+
+	    // Insert starting and ending code in main function
+	    for (Function::iterator bi = func_main->begin(), be = func_main->end(); bi != be; ++bi) {
+		for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
+		    Instruction *inst  = &*ii;
+		    if (dyn_cast<CallInst>(inst)) {
+			CallInst::Create(func_getSP, gvar_mem_stack_base, "", inst);
+			new StoreInst(gvar_spm_end, gvar_spm_stack_base, "", inst);
+			CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst); 
+		    }
+		    else if (inst->getOpcode() == Instruction::Ret) {
+			CallInst::Create(func_putSP, gvar_mem_stack_base, "", inst); 
 		    }
 		}
 	    }
