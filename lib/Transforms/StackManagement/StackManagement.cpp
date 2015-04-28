@@ -14,6 +14,7 @@
 
 #include "llvm/Pass.h"
 #include "llvm/PassManager.h"
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
@@ -35,6 +36,11 @@ namespace {
 
 	StackManagementPass() : ModulePass(ID) {
 	}
+
+	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+	    AU.addRequired<CallGraphWrapperPass>();
+	}
+
 
 	// Checks whether a function is a library function (including intrinsic functions)
 	inline bool isLibraryFunction(Function *func) {
@@ -97,27 +103,34 @@ namespace {
 	    InlineAsm *func_putSP = InlineAsm::get(functy_inline_asm, "mov $0, %rsp;", "*m,~{rsp},~{dirflag},~{fpsr},~{flags}",true);
 	    InlineAsm *func_getSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}",true);
 
+	    // Call graph
+	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
 
 	    // Step 1 : Add noinline attributes to functions
+	    /*
 	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
 		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
 		    continue;
 		fi->addFnAttr(Attribute::NoInline);
 	    }
-
+	    */
 
 	    // Step 2: Insert g2l function calls
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		Function *fi = cgi->second->getFunction();
 		//errs() << fi->getName() << "\n";
-		Function *caller = &*fi;
+		// Skip external nodes
+		if (!fi)
+		    continue;
 		// Skip library functions
-		if (isLibraryFunction(caller))
+		if (isLibraryFunction(fi))
 		    continue;
 		// Skip stack management functions
-		if (isStackManagementFunction(caller))
+		if (isStackManagementFunction(fi))
 		    continue;
 		// Skip main function
-		if (&*fi == func_main)
+		if (fi == func_main)
 		    continue;
 		// Process user-defined functions
 		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
@@ -171,76 +184,88 @@ namespace {
 	    }
 
 	    // Step 3: Insert l2g functions
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
+		Function *fi = cgn->getFunction();
 		//errs() << fi->getName() << "\n";
-		Function *caller = &*fi;
+		// Skip external nodes
+		if (!fi)
+		    continue;
 		// Skip library functions
-		if (isLibraryFunction(caller))
+		if (isLibraryFunction(fi))
 		    continue;
 		// Skip stack management functions
-		if (isStackManagementFunction(caller))
+		if (isStackManagementFunction(fi))
 		    continue;
 		// Process user-defined functions
-		for (Function::iterator bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
-		    for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ii++) {
-			Instruction *inst = ii;
-			if (CallInst *call_func = dyn_cast<CallInst>(inst)) {
-			    // Skip inline assembly
-			    if (call_func->isInlineAsm())
+		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
+		    if (CallInst *call_inst = dyn_cast<CallInst>(cgni->first)) {
+			// Skip inline assembly
+			if (call_inst->isInlineAsm())
+			    continue;
+			Function *callee = call_inst->getCalledFunction();
+			// If the called function is a function pointer or if it is not a stack management or an intrinsic function, go ahead and process
+			if (callee) { 
+			    if (isStackManagementFunction(callee))
 				continue;
-			    Function *callee = call_func->getCalledFunction();
-			    // If the called function is a function pointer or if it is not a stack management or an intrinsic function, go ahead and process
-			    if (callee) { 
-				if (isStackManagementFunction(callee))
-				    continue;
-				if (callee->isIntrinsic())
-				    continue;
-			    } 
-			    //  Insert l2g function before function calls wth address arguments
-			    for (unsigned int i = 0, n = call_func->getNumArgOperands(); i < n; i++) { 
-				Value *operand = call_func->getArgOperand(i);
-				if (operand->getType()->isPointerTy() ) {
-				    IRBuilder<> builder(call_func); // Instruction will be inserted before ii
-				    // Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
-				    Value *cast_to = builder.CreatePointerCast(operand, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-				    // Call the function l2g with the value with cast type
-				    Value *call_l2g = builder.CreateCall(func_l2g, cast_to, "l2g_on_char_pointer"); 
-				    // Cast the result back to be of the original type
-				    Value *cast_from = builder.CreatePointerCast(call_l2g, operand->getType(), "cast_from_result"); 
-				    for (unsigned int i = 0; i < call_func->getNumOperands(); i++) {
+			    assert(!callee->isIntrinsic());
+			    if (callee->isIntrinsic())
+				continue;
+			} 
+			//  Insert l2g function before function calls wth address arguments
+			for (unsigned int i = 0, n = call_inst->getNumArgOperands(); i < n; i++) { 
+			    Value *operand = call_inst->getArgOperand(i);
+			    if (operand->getType()->isPointerTy() ) {
+				IRBuilder<> builder(call_inst); // Instruction will be inserted before specified instruction
+				// Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
+				Value *cast_to = builder.CreatePointerCast(operand, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
+				// Call the function l2g with the value with cast type
+				Value *call_l2g = builder.CreateCall(func_l2g, cast_to, "l2g_on_char_pointer"); 
+				// Cast the result back to be of the original type
+				Value *cast_from = builder.CreatePointerCast(call_l2g, operand->getType(), "cast_from_result"); 
+				for (unsigned int i = 0; i < call_inst->getNumOperands(); i++) {
+				    // Replace the use of the original memory address with the translated address
+				    if (call_inst->getOperand(i) == operand ) 
 					// Replace the use of the original memory address with the translated address
-					if (call_func->getOperand(i) == operand ) 
-					    // Replace the use of the original memory address with the translated address
-					    call_func->setOperand(i, cast_from); 
-				    }
+					call_inst->setOperand(i, cast_from); 
 				}
 			    }
-
 			}
+
 		    }
 		}
 	    }
 
 
 	    // Step 4: Insert management functions
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		Function *caller = &*fi;
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
+		Function *fi = cgn->getFunction();
+		//errs() << fi->getName() << "\n";
+		// Skip external nodes
+		if (!fi)
+		    continue;
 		//Skip library functions
-		if (isLibraryFunction(caller))
+		if (isLibraryFunction(fi))
 		    continue;
 		// Skip stack management functions
-		if (isStackManagementFunction(caller))
+		if (isStackManagementFunction(fi))
 		    continue;
+
 		// Process user-defined functions
-		for (inst_iterator in = inst_begin(fi), ii=in++, ie = inst_end(fi); ii != ie; ii=in++) {
-		    Instruction *inst = &*ii;
-		    Instruction *next_inst = &*in;
+		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
 		    // Insert management functions around function calls
-		    if (CallInst * call_func = dyn_cast<CallInst>(inst)) {
+		    if (CallInst *call_inst = dyn_cast<CallInst>(cgni->first)) {
+			Instruction *inst = dyn_cast<Instruction>(cgni->first);
+			BasicBlock::iterator ii(inst);
+			Instruction *next_inst = &*(++ii);
+			BasicBlock::iterator in(next_inst);
+			assert(in != call_inst->getParent()->end());
+
 			// Skip inline assebmly
-			if (call_func->isInlineAsm())
+			if (call_inst->isInlineAsm())
 			    continue;
-			Function *callee = call_func->getCalledFunction();
+			Function *callee = call_inst->getCalledFunction();
 			// If the callee is a function pointer or not a management function and an instrinsic function, go ahead and process
 			if(callee) { 
 			    if (isStackManagementFunction(callee))
@@ -277,14 +302,14 @@ namespace {
 			CallInst::Create(func_sload, "", next_inst);
 
 			// Check if the function has return value
-			Type * retty = call_func->getType();
+			Type * retty = call_inst->getType();
 			if (retty->isVoidTy())
 			    continue;
 			// Save return value in a global variable to prevent it being overwritten by the execution of sload function
 			GlobalVariable *gvar = NULL; 
 
 			// Replace all the uses of return value with the value stored at the global variable
-			for (Value::user_iterator ui_ret = call_func->user_begin(), ue_ret = call_func->user_end(); ui_ret != ue_ret; ++ui_ret) {
+			for (Value::user_iterator ui_ret = call_inst->user_begin(), ue_ret = call_inst->user_end(); ui_ret != ue_ret; ++ui_ret) {
 			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui_ret)) {
 				// Always use a different global variable in case of recursive functions
 				if (!gvar) {
@@ -297,24 +322,17 @@ namespace {
 				    // Initialize the temporary global variable
 				    gvar->setInitializer(Constant::getNullValue(retty));
 				    // Save return value to the global variable before sload is called
-				    StoreInst *st_ret = new StoreInst(call_func, gvar);
-				    st_ret->insertAfter(call_func);
+				    StoreInst *st_ret = new StoreInst(call_inst, gvar);
+				    st_ret->insertAfter(call_inst);
 				}
 
 				// If return value is used in a phi instruction
 				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
 				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-					if(target->getIncomingValue(i) == call_func) {
+					if(target->getIncomingValue(i) == call_inst) {
 					    // Read the global variable
 					    LoadInst *restore_ret = new LoadInst(gvar, "", target->getIncomingBlock(i)->getTerminator());
 					    // Find the use of return value and replace it (At most one use in phi instruction)
-					    /*
-					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
-						if (user_inst->getOperand(j) == call_func) {
-						    user_inst->setOperand(j, restore_ret);
-						}
-					    }
-					     */
 					    target->setOperand(i, restore_ret);
 					}
 
@@ -324,7 +342,7 @@ namespace {
 				    LoadInst *restore_ret = new LoadInst(gvar, "", user_inst);
 				    // Find the uses of return value and replace them
 				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-					if (user_inst->getOperand(i) == call_func) { 
+					if (user_inst->getOperand(i) == call_inst) { 
 					    user_inst->setOperand(i, restore_ret);
 					}
 				    }
@@ -335,7 +353,7 @@ namespace {
 		}
 	    }
 
-	    // Step 5: transform the main function to an user-defined function
+	    // Step 5: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    ValueToValueMapTy VMap;
