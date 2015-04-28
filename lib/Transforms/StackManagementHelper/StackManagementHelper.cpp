@@ -74,8 +74,6 @@ namespace {
 	    PointerType* ptrty_int8 = PointerType::get(IntegerType::get(context, 8), 0);
 	    PointerType* ptrty_ptrint8 = PointerType::get(ptrty_int8, 0);
 
-	    ArrayType* arrayty_format = ArrayType::get(IntegerType::get(context, 8), 4);
-
 	    std::vector<Type*> call_args;
 	    call_args.push_back(ptrty_ptrint8);
 	    FunctionType* functy_inline_asm = FunctionType::get(
@@ -89,12 +87,6 @@ namespace {
 	    assert(gvar_sp_calling);
 	    GlobalVariable* gvar_func_name = mod.getGlobalVariable("_func_name");
 	    assert(gvar_func_name);
-	    GlobalVariable* gvar_format = new GlobalVariable(/*Module=*/mod,
-		    /*Type=*/arrayty_format,
-		    /*isConstant=*/true,
-		    /*Linkage=*/GlobalValue::PrivateLinkage,
-		    /*Initializer=*/0, // has initializer, specified below
-		    /*Name=*/".str_format");
 
 	    // Functions
 	    Function *func_main = mod.getFunction("main");
@@ -105,19 +97,92 @@ namespace {
 	    InlineAsm *func_getSP = InlineAsm::get(functy_inline_asm, "mov %rsp, $0;", "=*m,~{dirflag},~{fpsr},~{flags}",true);
 
 	    // Const values
-	    Constant *const_format = ConstantDataArray::getString(context, "%s ", true);
 	    ConstantInt* const_int64_0 = ConstantInt::get(context, APInt(64, StringRef("0"), 10));
 
-	    // Initialize the global variable which saves format string
-	    gvar_format->setInitializer(const_format);
+	    // Call graph
+	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
 	    // Get the pointer to the global variable which saves format string
 	    std::vector<Constant*> const_ptr_indices;
 	    const_ptr_indices.push_back(const_int64_0);
 	    const_ptr_indices.push_back(const_int64_0);
-	    Constant* const_ptr_format = ConstantExpr::getGetElementPtr(gvar_format, const_ptr_indices);
+	    //Constant* const_ptr_format = ConstantExpr::getGetElementPtr(gvar_format, const_ptr_indices);
 
-	    // Step 0: transform the main function to an user-defined function
+	    // Step 1 : Add noinline attributes to functions
+	    /*
+	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
+		//errs() << fi->getName() << "\n";
+		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
+		    continue;
+		fi->addFnAttr(Attribute::NoInline);
+	    }
+	    */
+
+	    // Step 2: Insert management helper functions
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
+		Function *fi = cgn->getFunction();
+		// Skip external nodes
+		if (!fi)
+		    continue;
+		// Skip library functions
+		if (isLibraryFunction(fi))
+		    continue;
+		// Skip stack management helper functions
+		if (isStackManagementHelperFunction(fi))
+		    continue;
+
+		// Process user-defined functions
+
+		// Get or build a gloabal variable which saves the name of current function
+		GlobalVariable* gvar_curfuncname = mod.getGlobalVariable("__func__." + fi->getName().str(), true);
+		Constant* const_ptr_curfuncname; 
+		if (!gvar_curfuncname) {
+		    //errs() << "__func__." + fi->getName().str() << "\n";
+		    ArrayType* arrayty_curfuncname =ArrayType::get(IntegerType::get(context, 8), fi->getName().size()+1);
+		    Constant *const_curfuncname = ConstantDataArray::getString(context, fi->getName(), true);
+		    gvar_curfuncname = new GlobalVariable(/*Module=*/mod,
+			    /*Type=*/arrayty_curfuncname,
+			    /*isConstant=*/true,
+			    /*Linkage=*/GlobalValue::PrivateLinkage,
+			    /*Initializer=*/0, // has initializer, specified below
+			    /*Name=*/"__func__." + fi->getName());
+		    gvar_curfuncname->setAlignment(1);
+		    const_ptr_curfuncname = ConstantExpr::getGetElementPtr(gvar_curfuncname, const_ptr_indices);
+		    gvar_curfuncname->setInitializer(const_curfuncname);
+		}
+		else
+		    const_ptr_curfuncname = ConstantExpr::getGetElementPtr(gvar_curfuncname, const_ptr_indices);
+
+
+		// Insert _get_stack_size() function before the first non-phi instruction in each function except main function
+		if (! (&*fi == func_main) ) {
+		    Instruction *firstNonPhiInst = fi->begin()->getFirstNonPHI();
+		    new StoreInst(const_ptr_curfuncname, gvar_func_name, false, firstNonPhiInst);
+		    CallInst::Create(func_get_func_stack_size, "", firstNonPhiInst);
+		}
+
+		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
+		    // If we find a function call, read the current SP value and print out the caller's name
+		    if (CallInst * call_func = dyn_cast<CallInst>(cgni->first)) {
+			// Skip inline assembly
+			if (call_func->isInlineAsm())
+			    continue;
+			Function *callee = call_func->getCalledFunction();
+			// SKip if callee is a function pointer or a library function
+			if(!callee) 
+			    continue;
+			if( isLibraryFunction(callee)) 
+			    continue;
+			if( isStackManagementHelperFunction(callee)) 
+			    continue;
+			// Read the current SP value
+			CallInst::Create(func_getSP, gvar_sp_calling, "", call_func);
+		    }
+		}
+	    }
+
+	    // Step 3: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    ValueToValueMapTy VMap;
@@ -164,80 +229,6 @@ namespace {
 		}
 	    }
 
-	    // Step 1 : Add noinline attributes to functions
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		//errs() << fi->getName() << "\n";
-		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
-		    continue;
-		fi->addFnAttr(Attribute::NoInline);
-	    }
-
-	    // Step 2: Insert management helper functions
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		Function *caller = &*fi;
-		//Skip if current function is a library function
-		if (isLibraryFunction(caller))
-		    continue;
-
-		// Skip if current function is a stackmanagement helper function
-		if (isStackManagementHelperFunction(caller))
-		    continue;
-
-		// If current function is an user-defined function
-
-		// Get or build a gloabal variable which saves the name of current function
-		GlobalVariable* gvar_curfuncname = mod.getGlobalVariable("__func__." + fi->getName().str(), true);
-		Constant* const_ptr_curfuncname; 
-		if (!gvar_curfuncname) {
-		    //errs() << "__func__." + fi->getName().str() << "\n";
-		    ArrayType* arrayty_curfuncname =ArrayType::get(IntegerType::get(context, 8), fi->getName().size()+1);
-		    Constant *const_curfuncname = ConstantDataArray::getString(context, fi->getName(), true);
-		    gvar_curfuncname = new GlobalVariable(/*Module=*/mod,
-			    /*Type=*/arrayty_curfuncname,
-			    /*isConstant=*/true,
-			    /*Linkage=*/GlobalValue::PrivateLinkage,
-			    /*Initializer=*/0, // has initializer, specified below
-			    /*Name=*/"__func__." + fi->getName());
-		    gvar_curfuncname->setAlignment(1);
-		    const_ptr_curfuncname = ConstantExpr::getGetElementPtr(gvar_curfuncname, const_ptr_indices);
-		    gvar_curfuncname->setInitializer(const_curfuncname);
-		}
-		else
-		    const_ptr_curfuncname = ConstantExpr::getGetElementPtr(gvar_curfuncname, const_ptr_indices);
-
-		// Set up arguments for printf
-		std::vector<Value*> call_params;
-		call_params.push_back(const_ptr_format);
-		call_params.push_back(const_ptr_curfuncname);
-
-		if (! (&*fi == func_main) ) {
-		    // Insert a printf function call to print out the caller's name
-		    Instruction *firstNonPhiInst = fi->begin()->getFirstNonPHI();
-		    new StoreInst(const_ptr_curfuncname, gvar_func_name, false, firstNonPhiInst);
-		    // Insert _get_stack_size() function before the first non-ph instruction
-		    CallInst::Create(func_get_func_stack_size, "", firstNonPhiInst);
-		}
-
-		for (inst_iterator ii = inst_begin(fi), ie = inst_end(fi); ii != ie; ii++) {
-		    Instruction *inst = &*ii;
-		    // If we find a function call, read the current SP value and print out the caller's name
-		    if (CallInst * call_func = dyn_cast<CallInst>(inst)) {
-			// Skip if callee is an inline asm
-			if (call_func->isInlineAsm())
-			    continue;
-			Function *callee = call_func->getCalledFunction();
-			// SKip if callee is a function pointer or a library function
-			if(!callee) 
-			    continue;
-			if( isLibraryFunction(callee)) 
-			    continue;
-			if( isStackManagementHelperFunction(callee)) 
-			    continue;
-			// Read the current SP value
-			CallInst::Create(func_getSP, gvar_sp_calling, "", call_func);
-		    }
-		}
-	    }
 	    return true;
 	}
 
@@ -430,7 +421,6 @@ namespace {
 	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph(); // call graph
 	    CallGraphNode *cgn_main = cg[mod.getFunction("main")]; 
 	    CallGraphNode::CallRecord *root;
-
 
 	    // Initialize root node by main function
 	    for (CallGraphNode::iterator cgni = cg.begin()->second->begin(), cgne = cg.begin()->second->end(); cgni != cgne; cgni++) {
