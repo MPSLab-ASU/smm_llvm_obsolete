@@ -33,6 +33,9 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "Graph.h"
+#include "Predicate.h"
+
 using namespace llvm;
 
 namespace {
@@ -45,157 +48,6 @@ namespace {
 
 	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
 	    AU.addRequired<CallGraphWrapperPass>();
-	}
-
-	// Checks whether a function is a library function (including intrinsic functions)
-	inline bool isLibraryFunction(Function *func) {
-	    return (func->isDeclaration()); 
-	}
-
-	// Check if a function is stack management function	
-	inline bool isStackManagementFunction(Function *func) {
-	    if (func->getName().count("_g2l") ==1)
-		return true;
-	    if (func->getName().count("_l2g") ==1)
-		return true;
-	    if (func->getName().count("_sstore") ==1)
-		return true;
-	    if (func->getName().count("_sload") ==1)
-		return true;
-	    if (func->getName().count("dma") ==1) {
-		return true;
-	    }
-
-	    return false;
-	}	
-
-	//Return all the paths iteratively from a graph rooted at the node specified and recursive functions
-	std::pair<std::vector<std::vector<CallGraphNode::CallRecord *> >, std::unordered_set<CallGraphNode *> > extractPaths(CallGraphNode::CallRecord *root) {
-	    unsigned int current_path_sel = 0; // This number always leads to next node of path that is going to be travsed
-	    unsigned int next_path_sel = 0; // This number always leads to the leftmost path that has not been travsed
-	    std::vector<std::vector<CallGraphNode::CallRecord *> > paths; // Used to keep the result
-	    std::unordered_set <CallGraphNode *> uncertain_functions; // Used to keep uncertain functions
-	    std::queue <CallGraphNode::CallRecord *> current_path; // Used to keep a record of current path
-	    std::stack < std::pair< std::queue <CallGraphNode::CallRecord *>, unsigned int > > next_path; // Used to keep a record of paths that has not been completely traversed, the first element of each pair saves the nodes that have been visited, and second element indicates the next node to visit
-
-	    // Check on validity of root node
-	    if ((root == NULL || root->second == NULL) ) {
-		errs() << "Try to generate paths for an empty graph!\n";
-		exit(-1);
-	    }
-
-	    // Initialize the call stack
-	    current_path.push(root);
-	    int counter = 0; // This counter is used to stop the loop in case of mutual recurrsion is present
-	    int mutual_recursion_threshold = 500;
-	    while(!current_path.empty() && counter++ < mutual_recursion_threshold) { 
-		// Pick up a node to visit
-		CallGraphNode::CallRecord *v = current_path.back(); 
-
-		bool only_recursive_edges = false;
-
-		// Check if a node has only self-recursive edges
-		if(v->second->size() > 0) {
-		    unsigned int i;
-		    for (i = 0; i < v->second->size(); i++) {
-			if ((*v->second)[i] != v->second) {
-			    break;
-			}
-		    }
-		    if( i >= v->second->size())
-			only_recursive_edges = true;
-		}
-
-		// Deal with endpoints - library function calls, leaf nodes, nodes with only recursive edges
-		if ( (v->second->getFunction() && isLibraryFunction(v->second->getFunction())) || v->second->size() == 0 || only_recursive_edges) {
-		    std::vector<CallGraphNode::CallRecord *> path;
-		    // Add current path to result if the endpoint is not an inline asm
-		    bool is_valid_path = true;
-		    if (current_path.back()->first) {
-			CallInst *call_inst = dyn_cast<CallInst>(current_path.back()->first);
-			assert(call_inst);
-			if (call_inst->isInlineAsm())
-			    is_valid_path = false;
-		    }
-		    if (is_valid_path) {
-			while(!current_path.empty()) {
-			    path.push_back(current_path.front());
-			    current_path.pop();
-			}
-			paths.push_back(path);
-			// Keep a record if the the node is self-recursive or external
-			if (only_recursive_edges || !v->second->getFunction()) {
-			    uncertain_functions.insert(v->second);
-			}
-		    }
-		    // Go to next path that has not been completely travsed
-		    if (!next_path.empty()) { 
-			auto temp = next_path.top();
-			next_path.pop();
-			// Restore nodes that have been visited on this path
-			current_path = temp.first;
-			// Restore the next node to visit
-			current_path_sel = temp.second;
-		    }
-		    // Finish current iteration
-		    continue;
-		}
-
-		// If the node being visited is not an endpoint
-		bool is_recursive = false;
-		// Find the first non-recursursive edge of the node
-		while ( current_path_sel < v->second->size()) { 
-		    // Skip recursive edges
-		    if ((*v->second)[current_path_sel] == v->second) {
-			//uncertain_functions.insert(v->second);
-			is_recursive = true;
-			current_path_sel++; 
-		    }
-		    else {
-			break;
-		    }
-		}
-		next_path_sel = current_path_sel + 1;
-
-		// Decide next path to explore if there are any
-		while ( next_path_sel < v->second->size()) { 
-		    // Skip self-recursive edges
-		    if ( (*v->second)[next_path_sel] == v->second ) {
-			//uncertain_functions.insert(v->second);
-			is_recursive = true;
-			next_path_sel++;
-		    }
-		    else { 
-			// Record the next path to explore
-			next_path.push(std::make_pair(current_path, next_path_sel));
-			break;
-		    }
-		}
-		//Keep a record of the found recursive node 
-		if (is_recursive)
-		    uncertain_functions.insert(v->second);
-
-		//Add selected node to current path
-		unsigned int i = 0; 
-		CallGraphNode::iterator cgni = v->second->begin();
-		do {
-		    if (i == current_path_sel) {
-			current_path.push(&*cgni);
-			break;
-		    }
-		    i++;
-		    cgni++;
-		} while (i < v->second->size());
-		// Reset selector of next node to visit in current path
-		current_path_sel = 0;
-	    }
-	    // Check the presence of mutual recursion
-	    if (counter >= mutual_recursion_threshold) {
-		errs() << "Too many iterations, possible presence of mutual recursion\n";
-		exit(-1);
-	    }
-
-	    return std::make_pair(paths, uncertain_functions);
 	}
 
 	virtual bool runOnModule(Module &mod) {
@@ -254,10 +106,10 @@ namespace {
 	    }
 	    assert(CallGraphNode::iterator(root) != cg.begin()->second->end());
 
-	    // Extarct all the paths from call graph rooted at main function
+	    // Step 0: Extarct all the paths from call graph rooted at main function
 	    auto res = extractPaths(root);
 	    paths = res.first;
-	    /*
+#ifdef DEBUG
 	    // Print out all the paths
 	    for (size_t i = 0; i < paths.size(); i++) {
 	    for (size_t j = 0; j < paths[i].size(); j++) {
@@ -269,18 +121,9 @@ namespace {
 	    errs() << "\n";
 	    }
 	    errs() << "\n\n";
-	     */
+#endif
 
-	    /*
-	    // Step 1 : Add noinline attributes to functions
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
-		    continue;
-		fi->addFnAttr(Attribute::NoInline);
-	    }
-	    */
-
-	    // Step 2: Insert g2l function calls
+	    // Step 1: Insert g2l function calls
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		Function *fi = cgi->second->getFunction();
 		//errs() << fi->getName() << "\n";
@@ -340,7 +183,7 @@ namespace {
 		}
 	    }
 
-	    // Step 3: Insert l2g functions
+	    // Step 2: Insert l2g functions
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
 		Function *fi = cgn->getFunction();
@@ -393,10 +236,11 @@ namespace {
 		}
 	    }
 
-	    // Step 4: Insert management functions
-	    std::vector <std::tuple<long, long, std::string> > cuts;
-	    // Read SSDM output
+	    // Step 3: Insert management functions
 	    std::ifstream ifs;
+	    std::vector <std::tuple<long, long, std::string> > cuts;
+
+	    // Read SSDM output
 	    ifs.open("wcg_cuts.txt", std::fstream::in);
 	    assert(ifs.good());
 	    // Read function stack sizes
@@ -407,7 +251,6 @@ namespace {
 		cuts.push_back(std::make_tuple(i-1, j-1, func_name));
 	    }
 	    ifs.close();
-
 
 	    // Insert stack management functions according to SSDM output
 	    for (size_t ci = 0; ci < cuts.size(); ci++) {
@@ -520,19 +363,23 @@ namespace {
 		}
 	    }
 
-	    /*
+	    // Insert management functions to recursive functions
+
+#ifdef DEBUG
 	    // Print out all the paths
 	    for (size_t i = 0; i < paths.size(); i++) {
-	    for (size_t j = 0; j < paths[i].size(); j++) {
-	    if (paths[i][j]->second->getFunction())
-	    errs() << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
-	    else
-	    errs() << paths[i][j]->first << " " << "externalNode" << "\t";
+		for (size_t j = 0; j < paths[i].size(); j++) {
+		    if (paths[i][j]->second->getFunction())
+			errs() << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
+		    else
+			errs() << paths[i][j]->first << " " << "externalNode" << "\t";
+		}
+		errs() << "\n";
 	    }
-	    errs() << "\n";
-	    }*/
 
-	    // Step 5: transform the main function to an user-defined function
+#endif
+
+	    // Step 4: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    ValueToValueMapTy VMap;
