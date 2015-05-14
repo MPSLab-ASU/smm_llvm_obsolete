@@ -1,3 +1,5 @@
 add_llvm_loadable_module( LLVMStackManagement
-  StackManagement.cpp
-  )
+	function.cpp
+	instrumentation.cpp
+	StackManagement.cpp
+	)

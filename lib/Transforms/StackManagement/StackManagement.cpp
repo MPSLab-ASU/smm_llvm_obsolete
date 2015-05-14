@@ -27,6 +27,12 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "function.h"
+#include "instrumentation.h"
+
+
+#define DEBUG
+
 using namespace llvm;
 
 namespace {
@@ -40,29 +46,6 @@ namespace {
 	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
 	    AU.addRequired<CallGraphWrapperPass>();
 	}
-
-
-	// Checks whether a function is a library function (including intrinsic functions)
-	inline bool isLibraryFunction(Function *func) {
-	    return (func->isDeclaration()); 
-	}
-
-	// Check if a function is stack management function	
-	inline bool isStackManagementFunction(Function *func) {
-	    if (func->getName().count("_g2l") ==1)
-		return true;
-	    if (func->getName().count("_l2g") ==1)
-		return true;
-	    if (func->getName().count("_sstore") ==1)
-		return true;
-	    if (func->getName().count("_sload") ==1)
-		return true;
-	    if (func->getName().count("dma") ==1) {
-		return true;
-	    }
-
-	    return false;
-	}	
 
 	virtual bool runOnModule(Module &mod) {
 	    LLVMContext &context = mod.getContext();
@@ -94,8 +77,6 @@ namespace {
 
 	    // Functions
 	    Function *func_main = mod.getFunction("main");
-	    Function *func_g2l = mod.getFunction("_g2l");
-	    Function *func_l2g = mod.getFunction("_l2g");
 	    Function *func_sstore = mod.getFunction("_sstore");
 	    Function *func_sload = mod.getFunction("_sload");
 
@@ -107,22 +88,26 @@ namespace {
 	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
 
-	    // Step 1 : Add noinline attributes to functions
-	    /*
-	    for (Module::iterator fi = mod.begin(), fe = mod.end(); fi != fe; ++fi) {
-		if (fi->hasFnAttribute(Attribute::NoInline) || fi->hasFnAttribute(Attribute::AlwaysInline) )
-		    continue;
-		fi->addFnAttr(Attribute::NoInline);
-	    }
-	    */
+	    // Step 1:  Find uses of pointers and call l2g or g2l accordingly
+	    // Find uses of stack variables
+#ifdef DEBUG
+	    errs() << "Pointer management functions instrumentation {\n";
+#endif
 
-	    // Step 2: Insert g2l function calls
+
+#ifdef DEBUG
+	    errs() << "g2l function instrumentation {\n";
+#endif
+	    // Step 2: Insert pointer management functions
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
-		Function *fi = cgi->second->getFunction();
-		//errs() << fi->getName() << "\n";
+		CallGraphNode *cgn = cgi->second;
+		Function *fi = cgn->getFunction();
 		// Skip external nodes
 		if (!fi)
 		    continue;
+#ifdef DEBUG
+		errs() << "\t" << fi->getName() << "\n";
+#endif
 		// Skip library functions
 		if (isLibraryFunction(fi))
 		    continue;
@@ -132,116 +117,43 @@ namespace {
 		// Skip main function
 		if (fi == func_main)
 		    continue;
-		// Process user-defined functions
-		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
-		    // Find user instructions of pointer arguments and replace the uses with the result of calling g2l on the arguments
-		    if (ai->getType()->isPointerTy()) { 
-			//errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
-			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
-			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { 
-				//errs() << "\t\t" << *user_inst << "\n";
-				// If the user instruction a phi instruction, insert g2l function on the incoming basic blocks
-				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
-				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-					if(target->getIncomingValue(i) == ai) { 
-					    IRBuilder<> builder(target->getIncomingBlock(i)->getTerminator()); // Instruction will be inserted before this instruction
-					    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-					    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-					    // Call the function l2g with the value with cast type
-					    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-					    // Cast the result back to be of the original type
-					    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result");
-					    // Replace the use of pointer argument (At most one use in phi instruction)
-					    /*
-					    for (unsigned int j = 0; j < user_inst->getNumOperands(); j++) {
-						if (user_inst->getOperand(j) == ai) {
-						    user_inst->setOperand(j, cast_from);
-						}
-					    }
-					    */
-					    target->setOperand(i, cast_from);
-					}
-
-				    }
-				} else { // If the user instruction is not a phi instruction, insert g2l function before it
-				    IRBuilder<> builder(user_inst); // Instruction will be inserted before this instruction
-				    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-				    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer");
-				    // Call the function l2g with the value with cast type
-				    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-				    // Cast the result back to be of the original type
-				    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); 
-				    // Replace the uses of the pointer argument
-				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-					if (user_inst->getOperand(i) == ai ) 
-					    user_inst->setOperand(i, cast_from); 
-				    }
-				}
-			    }
-			}
-		    }
-		}
-	    }
-
-	    // Step 3: Insert l2g functions
-	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
-		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
-		Function *fi = cgn->getFunction();
-		//errs() << fi->getName() << "\n";
-		// Skip external nodes
-		if (!fi)
-		    continue;
-		// Skip library functions
-		if (isLibraryFunction(fi))
-		    continue;
-		// Skip stack management functions
-		if (isStackManagementFunction(fi))
-		    continue;
-		// Process user-defined functions
-		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
-		    if (CallInst *call_inst = dyn_cast<CallInst>(cgni->first)) {
-			// Skip inline assembly
-			if (call_inst->isInlineAsm())
-			    continue;
-			Function *callee = call_inst->getCalledFunction();
-			// If the called function is a function pointer or if it is not a stack management or an intrinsic function, go ahead and process
-			if (callee) { 
-			    if (isStackManagementFunction(callee))
-				continue;
-			    assert(!callee->isIntrinsic());
-			    if (callee->isIntrinsic())
-				continue;
-			} 
-			//  Insert l2g function before function calls wth address arguments
-			for (unsigned int i = 0, n = call_inst->getNumArgOperands(); i < n; i++) { 
-			    Value *operand = call_inst->getArgOperand(i);
-			    if (operand->getType()->isPointerTy() ) {
-				IRBuilder<> builder(call_inst); // Instruction will be inserted before specified instruction
-				// Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
-				Value *cast_to = builder.CreatePointerCast(operand, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-				// Call the function l2g with the value with cast type
-				Value *call_l2g = builder.CreateCall(func_l2g, cast_to, "l2g_on_char_pointer"); 
-				// Cast the result back to be of the original type
-				Value *cast_from = builder.CreatePointerCast(call_l2g, operand->getType(), "cast_from_result"); 
-				for (unsigned int i = 0; i < call_inst->getNumOperands(); i++) {
-				    // Replace the use of the original memory address with the translated address
-				    if (call_inst->getOperand(i) == operand ) 
-					// Replace the use of the original memory address with the translated address
-					call_inst->setOperand(i, cast_from); 
-				}
-			    }
-			}
-
-		    }
-		}
+		// Insert g2l functions
+		g2l_pointer_management_instrumentation(mod, cgn);
 	    }
 
 
-	    // Step 4: Insert management functions
+#ifdef DEBUG
+	    errs() << "l2g function instrumentation {\n";
+#endif
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
+		    Function *fi = cgn->getFunction();
+		    // Skip external nodes
+		    if(!fi)
+			continue;
+		    // Skip library functions
+		    if (isLibraryFunction(fi))
+			continue;
+		    // Skip management functions
+		    if (isStackManagementFunction(fi))
+			continue;
+		    // insert l2g functions
+		    l2g_pointer_management_instrumentation(mod, cgn);
+		}
+	    }
+
+#ifdef DEBUG
+	    errs() << "}\n\n\n";
+#endif
+
+#ifdef DEBUG
+	    errs() << "Stack management functions instrumentation: {\n";
+#endif
+
+	    // Step 2: Insert management functions
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
 		Function *fi = cgn->getFunction();
-		//errs() << fi->getName() << "\n";
 		// Skip external nodes
 		if (!fi)
 		    continue;
@@ -252,6 +164,9 @@ namespace {
 		if (isStackManagementFunction(fi))
 		    continue;
 
+#ifdef DEBUG
+		errs() << fi->getName() << "\n";
+#endif
 		// Process user-defined functions
 		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
 		    // Insert management functions around function calls
@@ -301,59 +216,65 @@ namespace {
 			// Insert a corresponding sload function
 			CallInst::Create(func_sload, "", next_inst);
 
-			// Check if the function has return value
+			// Skip if the function does not have return value
 			Type * retty = call_inst->getType();
 			if (retty->isVoidTy())
 			    continue;
-			// Save return value in a global variable to prevent it being overwritten by the execution of sload function
-			GlobalVariable *gvar = NULL; 
+			// Skip if the return value is never used
+			if (call_inst->getNumUses() == 0)
+			    continue;
+			// Save return value in a global variable temporarily until sload is executed if it is used
+			// Always create a new global variable in case of recursive functions
+			GlobalVariable *gvar = new GlobalVariable(mod, //Module
+				retty, //Type
+				false, //isConstant
+				GlobalValue::ExternalLinkage, //linkage
+				0, // Initializer
+				"_gvar"); //Name
+			// Initialize the temporary global variable
+			gvar->setInitializer(Constant::getNullValue(retty));
+			// Save return value to the global variable before sload is called
+			StoreInst *st_ret = new StoreInst(call_inst, gvar);
+			st_ret->insertAfter(call_inst);
 
-			// Replace all the uses of return value with the value stored at the global variable
-			for (Value::user_iterator ui_ret = call_inst->user_begin(), ue_ret = call_inst->user_end(); ui_ret != ue_ret; ++ui_ret) {
-			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui_ret)) {
-				// Always use a different global variable in case of recursive functions
-				if (!gvar) {
-				    gvar = new GlobalVariable(mod, //Module
-					    retty, //Type
-					    false, //isConstant
-					    GlobalValue::ExternalLinkage, //linkage
-					    0, // Initializer
-					    "_gvar"); //Name
-				    // Initialize the temporary global variable
-				    gvar->setInitializer(Constant::getNullValue(retty));
-				    // Save return value to the global variable before sload is called
-				    StoreInst *st_ret = new StoreInst(call_inst, gvar);
-				    st_ret->insertAfter(call_inst);
-				}
-
-				// If return value is used in a phi instruction
-				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
-				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-					if(target->getIncomingValue(i) == call_inst) {
-					    // Read the global variable
-					    LoadInst *restore_ret = new LoadInst(gvar, "", target->getIncomingBlock(i)->getTerminator());
-					    // Find the use of return value and replace it (At most one use in phi instruction)
-					    target->setOperand(i, restore_ret);
-					}
-
-				    }
-				} else { // Return value is used in a non-phi instruction
-				    // Read the global variable
-				    LoadInst *restore_ret = new LoadInst(gvar, "", user_inst);
-				    // Find the uses of return value and replace them
-				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-					if (user_inst->getOperand(i) == call_inst) { 
-					    user_inst->setOperand(i, restore_ret);
-					}
-				    }
+#ifdef DEBUG
+			errs() << "\t" << *call_inst <<  " " << call_inst->getNumUses() << "\n";
+#endif
+			for (Value::use_iterator ui_ret = call_inst->use_begin(), ue_ret = call_inst->use_end(); ui_ret != ue_ret;) {
+			    // Move iterator to next use before the current use is destroyed
+			    Use *u = &*ui_ret++;
+			    Instruction *user_inst = dyn_cast<Instruction>(u->getUser()); 
+			    assert(user_inst);
+#ifdef DEBUG
+			    errs() <<  "\t\t" << *user_inst << "\n";
+#endif
+			    if (StoreInst *st_inst = dyn_cast <StoreInst> (user_inst)) {
+				if (st_inst->getPointerOperand()->getName().count("_gvar") == 1) {
+#ifdef DEBUG
+				    errs() << "\t\t\t" << st_inst->getPointerOperand()->getName() << "\n";
+#endif
+				    continue;
 				}
 			    }
+
+			    Instruction *insert_point = user_inst;
+
+			    if (PHINode *phi_inst = dyn_cast<PHINode>(user_inst))
+				insert_point = phi_inst->getIncomingBlock(u->getOperandNo())->getTerminator();
+
+			    // Read the global variable
+			    LoadInst *ret_val = new LoadInst(gvar, "", insert_point);
+			    // Find the uses of return value and replace them
+			    u->set(ret_val);
 			}
 		    }
 		}
 	    }
 
-	    // Step 5: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
+#ifdef DEBUG
+	    errs() << "}\n\n";
+#endif
+	    // Step 3: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    ValueToValueMapTy VMap;
