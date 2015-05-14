@@ -1,5 +1,5 @@
-#ifndef __PREDICATE_H__
-#define __PREDICATE_H__
+#ifndef __MYFUNCTION_H__
+#define __MYFUNCION_H__
 
 #include "llvm/IR/Function.h"
 

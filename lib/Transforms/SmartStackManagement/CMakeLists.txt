@@ -1,6 +1,7 @@
 add_llvm_loadable_module( LLVMSmartStackManagement
-  Graph.cpp
-  Predicate.cpp
+  function.cpp
+  graph.cpp
+  instrumentation.cpp
   StackManagementHelper.cpp
   SmartStackManagement.cpp
   )

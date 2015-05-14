@@ -36,8 +36,8 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "Graph.h"
-#include "Predicate.h"
+#include "function.h"
+#include "graph.h"
 
 
 using namespace llvm;
@@ -135,11 +135,11 @@ namespace {
 
 
 		// Insert _get_stack_size() function before the first non-phi instruction in each function except main function
-		if (! (&*fi == func_main) ) {
-		    Instruction *firstNonPhiInst = fi->begin()->getFirstNonPHI();
-		    new StoreInst(const_ptr_curfuncname, gvar_func_name, false, firstNonPhiInst);
-		    CallInst::Create(func_get_func_stack_size, "", firstNonPhiInst);
-		}
+		//if (! (&*fi == func_main) ) {
+		    Instruction *first_non_phi = fi->begin()->getFirstNonPHI();
+		    new StoreInst(const_ptr_curfuncname, gvar_func_name, false, first_non_phi);
+		    CallInst::Create(func_get_func_stack_size, "", first_non_phi);
+		//}
 
 		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
 		    // If we find a function call, read the current SP value and print out the caller's name
@@ -194,6 +194,8 @@ namespace {
 	    // Create the new body of main function which calls smm_main and return 0
 	    BasicBlock* entry_block = BasicBlock::Create(getGlobalContext(), "EntryBlock", func_main);
 	    IRBuilder<> builder(entry_block);
+	    // Read the current SP value
+	    builder.CreateCall(func_getSP, gvar_sp_calling);
 	    builder.CreateCall(func_smm_main, args);
 	    Value *zero = builder.getInt32(0);
 	    builder.CreateRet(zero);

@@ -11,7 +11,7 @@
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "Predicate.h"
+#include "function.h"
 
 
 using namespace llvm;

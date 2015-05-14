@@ -11,13 +11,6 @@
 // loops, or portions of a module from the rest of the module.
 //
 //===----------------------------------------------------------------------===//
-
-#include <fstream>
-#include <queue>
-#include <tuple>
-#include <stack>
-#include <unordered_set>
-
 #include "llvm/Pass.h"
 #include "llvm/PassManager.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -33,8 +26,18 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "Graph.h"
-#include "Predicate.h"
+#include <fstream>
+#include <queue>
+#include <tuple>
+#include <stack>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "function.h"
+#include "graph.h"
+#include "instrumentation.h"
+
+#define DEBUG
 
 using namespace llvm;
 
@@ -75,15 +78,15 @@ namespace {
 	    // Global Variables
 	    GlobalVariable* gvar_mem_stack_base = mod.getGlobalVariable("_mem_stack_base");
 	    GlobalVariable* gvar_spm_stack_base = mod.getGlobalVariable("_spm_stack_base");
-	    GlobalVariable* gvar_spm_depth = mod.getGlobalVariable("_stack_depth");
-	    GlobalVariable* gvar_stack = mod.getGlobalVariable("_stack");
+	    //GlobalVariable* gvar_spm_depth = mod.getGlobalVariable("_stack_depth");
+	    //GlobalVariable* gvar_stack = mod.getGlobalVariable("_stack");
 
 	    // Functions
 	    Function *func_main = mod.getFunction("main");
-	    Function *func_g2l = mod.getFunction("_g2l");
-	    Function *func_l2g = mod.getFunction("_l2g");
+	    //Function *func_g2l = mod.getFunction("_g2l");
+	    //Function *func_l2g = mod.getFunction("_l2g");
 	    Function *func_sstore = mod.getFunction("_sstore");
-	    Function *func_sload = mod.getFunction("_sload");
+	    //Function *func_sload = mod.getFunction("_sload");
 
 	    // Inline Assembly
 	    InlineAsm *func_putSP = InlineAsm::get(functy_inline_asm, "mov $0, %rsp;", "*m,~{rsp},~{dirflag},~{fpsr},~{flags}",true);
@@ -94,7 +97,7 @@ namespace {
 	    CallGraphNode *cgn_main = cg[mod.getFunction("main")];
 	    CallGraphNode::CallRecord *root;
 	    std::vector<std::vector<CallGraphNode::CallRecord *> > paths;
-	    //std::unordered_set <CallGraphNode *> uncertain_functions;
+	    std::unordered_set <CallGraphNode *> undecidable_cgns;
 
 	    //Step 0: extract all the paths from original call graph
 	    // Initialize root node by main function
@@ -109,24 +112,79 @@ namespace {
 	    // Step 0: Extarct all the paths from call graph rooted at main function
 	    auto res = extractPaths(root);
 	    paths = res.first;
+	    undecidable_cgns = res.second;
 #ifdef DEBUG
+	    errs() <<  "Extract paths {\n";
 	    // Print out all the paths
 	    for (size_t i = 0; i < paths.size(); i++) {
-	    for (size_t j = 0; j < paths[i].size(); j++) {
-	    if (paths[i][j]->second->getFunction())
-	    errs() << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
-	    else
-	    errs() << paths[i][j]->first << " " << "externalNode" << "\t";
+		for (size_t j = 0; j < paths[i].size(); j++) {
+		    if (paths[i][j]->second->getFunction())
+			errs() << "\t" << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
+		    else
+			errs() << "\t" << paths[i][j]->first << " " << "externalNode" << "\t";
+		}
+		errs() << "\n";
 	    }
-	    errs() << "\n";
-	    }
-	    errs() << "\n\n";
+	    errs() << "}\n\n";
 #endif
 
-	    // Step 1: Insert g2l function calls
+	    // Step 1: get SSMD cuts
+	    std::unordered_map <unsigned, std::vector <std::pair<unsigned, std::string> > > cuts;
+	    // Read SSDM output file
+	    std::ifstream ifs;
+	    ifs.open("wcg_cuts.txt", std::fstream::in);
+	    assert(ifs.good());
+	    // Read function stack sizes
+#ifdef DEBUG
+	    errs() << "Reading SSDM output file...\n";
+	    errs() << "{\n";
+#endif
+	    while (ifs.good()) {
+		unsigned i, j;
+		std::string func_name;
+		ifs >> i >> j >> func_name;
+		// Ignore white spaces after the last line
+		if (func_name != "") {
+#ifdef DEBUG		    
+		    errs() << "\t" << i << " " << j << " " << func_name << "\n";
+#endif
+		    cuts[i-1].push_back( std::make_pair(j-1, func_name) );
+		}
+	    }
+	    ifs.close();
+
+#ifdef DEBUG
+	    errs() << "}\n\n\n";
+	    errs() << "Sorting SSDM cuts according to paths...\n";
+	    errs() << "{\n";
+#endif
+
+	    // Sort cuts acoording to paths
+	    for (auto cutsi = cuts.begin(), cutse = cuts.end(); cutsi != cutse; cutsi++) {
+		std::sort(cutsi->second.begin(), cutsi->second.end());
+#ifdef DEBUG
+		errs() << "\tpath " << cutsi->first << " : ";
+		for (size_t i = 0; i < cutsi->second.size(); i++)
+		    errs() << cutsi->second[i].first << " " << cutsi->second[i].second << "  ";
+		errs() << "\n";
+#endif
+	    }
+#ifdef DEBUG
+	    errs() << "}\n\n\n";
+#endif
+
+
+#ifdef DEBUG
+	    errs() << "Pointer management functions instrumentation {\n";
+#endif
+
+#ifdef DEBUG
+	    errs() << "Inserting g2l functions... {\n";
+#endif
+	    // Step 2: Insert g2l function calls
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
-		Function *fi = cgi->second->getFunction();
-		//errs() << fi->getName() << "\n";
+		CallGraphNode *cgn = cgi->second;
+		Function *fi = cgn->getFunction();
 		// Skip external nodes
 		if (!fi)
 		    continue;
@@ -140,243 +198,118 @@ namespace {
 		if (fi == func_main)
 		    continue;
 		// Process user-defined functions
-		for (Function::arg_iterator ai = fi->arg_begin(), ae = fi->arg_end(); ai != ae; ai++) {
-		    // Find user instructions of pointer arguments and replace the uses with the result of calling g2l on the arguments
-		    if (ai->getType()->isPointerTy()) { 
-			//errs() << "\t" << ai->getName() << " : " << *ai->getType() << "\n";
-			for (Value::user_iterator ui = ai->user_begin(), ue = ai->user_end(); ui != ue; ++ui) {
-			    if (Instruction *user_inst = dyn_cast<Instruction>(*ui)) { 
-				//errs() << "\t\t" << *user_inst << "\n";
-				// If the user instruction a phi instruction, insert g2l function on the incoming basic blocks
-				if (PHINode *target = dyn_cast<PHINode>(user_inst)) {
-				    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-					if(target->getIncomingValue(i) == ai) { 
-					    IRBuilder<> builder(target->getIncomingBlock(i)->getTerminator()); // Instruction will be inserted before this instruction
-					    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-					    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-					    // Call the function l2g with the value with cast type
-					    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-					    // Cast the result back to be of the original type
-					    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result");
-					    // Replace the use of pointer argument (At most one use in phi instruction)
-					    target->setOperand(i, cast_from);
-					}
-
-				    }
-				} else { // If the user instruction is not a phi instruction, insert g2l function before it
-				    IRBuilder<> builder(user_inst); // Instruction will be inserted before this instruction
-				    // Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-				    Value *cast_to = builder.CreatePointerCast(ai, Type::getInt8PtrTy(context), "cast_to_char_pointer");
-				    // Call the function l2g with the value with cast type
-				    Value *call_g2l = builder.CreateCall(func_g2l, cast_to, "g2l_on_char_pointer");
-				    // Cast the result back to be of the original type
-				    Value *cast_from = builder.CreatePointerCast(call_g2l, ai->getType(), "cast_from_result"); 
-				    // Replace the uses of the pointer argument
-				    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-					if (user_inst->getOperand(i) == ai ) 
-					    user_inst->setOperand(i, cast_from); 
-				    }
-				}
-			    }
-			}
-		    }
-		}
+		g2l_pointer_management_instrumentation(mod, cgn);
 	    }
+#ifdef DEBUG
+	    errs() << "}";
+#endif
 
-	    // Step 2: Insert l2g functions
+#ifdef DEBUG
+	    errs() << "Inserting l2g functions: {\n";
+#endif
+	    // Step 3: Insert l2g functions
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
 		Function *fi = cgn->getFunction();
-		//errs() << fi->getName() << "\n";
 		// Skip external nodes
 		if (!fi)
 		    continue;
+#ifdef DEBUG
+		errs() << "\t" << fi->getName() << "\n";
+#endif
 		// Skip library functions
 		if (isLibraryFunction(fi))
 		    continue;
 		// Skip stack management functions
 		if (isStackManagementFunction(fi))
 		    continue;
+
 		// Process user-defined functions
-		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
-		    if (CallInst *call_inst = dyn_cast<CallInst>(cgni->first)) {
-			// Skip inline assembly
-			if (call_inst->isInlineAsm())
-			    continue;
-			Function *callee = call_inst->getCalledFunction();
-			// If the called function is a function pointer or if it is not a stack management or an intrinsic function, go ahead and process
-			if (callee) { 
-			    if (isStackManagementFunction(callee))
-				continue;
-			    assert(!callee->isIntrinsic());
-			    if (callee->isIntrinsic())
-				continue;
-			} 
-			//  Insert l2g function before function calls wth address arguments
-			for (unsigned int i = 0, n = call_inst->getNumArgOperands(); i < n; i++) { 
-			    Value *operand = call_inst->getArgOperand(i);
-			    if (operand->getType()->isPointerTy() ) {
-				IRBuilder<> builder(call_inst); // Instruction will be inserted before ii
-				// Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
-				Value *cast_to = builder.CreatePointerCast(operand, Type::getInt8PtrTy(context), "cast_to_char_pointer"); 
-				// Call the function l2g with the value with cast type
-				Value *call_l2g = builder.CreateCall(func_l2g, cast_to, "l2g_on_char_pointer"); 
-				// Cast the result back to be of the original type
-				Value *cast_from = builder.CreatePointerCast(call_l2g, operand->getType(), "cast_from_result"); 
-				for (unsigned int i = 0; i < call_inst->getNumOperands(); i++) {
-				    // Replace the use of the original memory address with the translated address
-				    if (call_inst->getOperand(i) == operand ) 
-					// Replace the use of the original memory address with the translated address
-					call_inst->setOperand(i, cast_from); 
-				}
-			    }
-			}
-
-		    }
-		}
+		l2g_pointer_management_instrumentation(mod, cgn);
 	    }
-
-	    // Step 3: Insert management functions
-	    std::ifstream ifs;
-	    std::vector <std::tuple<long, long, std::string> > cuts;
-
-	    // Read SSDM output
-	    ifs.open("wcg_cuts.txt", std::fstream::in);
-	    assert(ifs.good());
-	    // Read function stack sizes
-	    while (ifs.good()) {
-		long i, j;
-		std::string func_name;
-		ifs >> i >> j >> func_name;
-		cuts.push_back(std::make_tuple(i-1, j-1, func_name));
-	    }
-	    ifs.close();
-
-	    // Insert stack management functions according to SSDM output
-	    for (size_t ci = 0; ci < cuts.size(); ci++) {
-		long i, j;
-		std::string func_name;
-		i = std::get<0>(cuts[ci]);
-		j = std::get<1>(cuts[ci]);
-		func_name = std::get<2>(cuts[ci]);
-		assert(paths[i][j]->first && paths[i][j]->second);
-		Instruction *inst = dyn_cast<Instruction> (paths[i][j]->first);
-		//CallGraphNode *called_cgn = dyn_cast<CallGraphNode> (paths[i][j]->second);
-
-		//errs() << "Inserting cuts: ";
-		//errs() << i << " " << j << " " << *paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\n";
-
-		BasicBlock::iterator ii(inst);
-		// Check if stack management functions have been inserted
-		BasicBlock::iterator pos = ii;
-		long k = 0;
-		do {
-		    if (pos == ii->getParent()->begin())
-			break;
-		    pos--;
-		    k++;
-		} while(k < 2);
-
-		if (k >= 2) {
-		    CallInst *call_inst = dyn_cast<CallInst>(pos);
-		    if (call_inst && call_inst->getCalledFunction() == func_sstore)
-			continue;
-		}
-
-
-		Instruction *next_inst = &*(++ii);
-		CallInst *call_inst = dyn_cast<CallInst>(inst);
-		assert(call_inst);
-
-		// Before the function call
-		// Insert a sstore function
-		CallInst::Create(func_sstore, "", inst);
-		// Insert putSP(_spm_stack_base)
-		CallInst::Create(func_putSP, gvar_spm_stack_base, "", inst);
-		// After the function call
-		// Read value of _stack_depth after the function call
-		LoadInst* val__spm_depth = new LoadInst(gvar_spm_depth, "", false, next_inst);
-		ConstantInt* const_int32_0 = ConstantInt::get(context, APInt(32, StringRef("0"), 10));
-		ConstantInt* const_int64_1 = ConstantInt::get(context, APInt(64, StringRef("1"), 10));
-		// Calculate _stack_depth - 1
-		BinaryOperator* val__spm_depth1 = BinaryOperator::Create(Instruction::Sub, val__spm_depth, const_int64_1, "sub", next_inst);
-		// Get the address of _stack[_stack_depth-1]
-		std::vector<Value*> ptr_arrayidx_indices;
-		ptr_arrayidx_indices.push_back(const_int32_0);
-		ptr_arrayidx_indices.push_back(val__spm_depth1);
-		Instruction* ptr_arrayidx = GetElementPtrInst::Create(gvar_stack, ptr_arrayidx_indices, "arrayidx", next_inst);
-		// Get the address of _stack[_stack_depth-1].spm_address
-		std::vector<Value*> ptr_spm_addr_indices;
-		ptr_spm_addr_indices.push_back(const_int32_0);
-		ptr_spm_addr_indices.push_back(const_int32_0);
-		Instruction* ptr_spm_addr = GetElementPtrInst::Create(ptr_arrayidx, ptr_spm_addr_indices, "spm_addr", next_inst);
-		// Insert putSP(_stack[_stack_depth-1].spm_addr)
-		CallInst::Create(func_putSP, ptr_spm_addr, "", next_inst);
-		// Insert a corresponding sload function
-		CallInst::Create(func_sload, "", next_inst);
-
-		// Check if the function has return value
-		Type * retty = call_inst->getType();
-		if (retty->isVoidTy())
-		    continue;
-		// Save return value in a global variable temporarily until sload is executed if it is used
-		GlobalVariable *gvar = NULL; // Always create a new global variable in case of recursive functions
-
-		for (Value::user_iterator ui_ret = call_inst->user_begin(), ue_ret = call_inst->user_end(); ui_ret != ue_ret; ++ui_ret) {
-		    if (Instruction *user_inst = dyn_cast<Instruction>(*ui_ret)) { // We have found the use of return value
-			if (!gvar) {
-			    gvar = new GlobalVariable(mod, //Module
-				    retty, //Type
-				    false, //isConstant
-				    GlobalValue::ExternalLinkage, //linkage
-				    0, // Initializer
-				    "_gvar"); //Name
-			    // Initialize the temporary global variable
-			    gvar->setInitializer(Constant::getNullValue(retty));
-			    // Save return value to the global variable before sload is called
-			    StoreInst *st_ret = new StoreInst(call_inst, gvar);
-			    st_ret->insertAfter(call_inst);
-			}
-
-			if (PHINode *target = dyn_cast<PHINode>(user_inst)) { // Return value is used in a phi instruction
-			    //errs() << *target << "\n";
-			    for (unsigned int i = 0; i < target->getNumIncomingValues(); i++) {
-				if(target->getIncomingValue(i) == call_inst) {
-				    // Read the global variable
-				    LoadInst *restore_ret = new LoadInst(gvar, "", target->getIncomingBlock(i)->getTerminator());
-				    // Find the use of return value and replace it (At most one use in phi instruction)
-				    target->setOperand(i, restore_ret);
-				}
-
-			    }
-			} else { // Return value is used in a non-phi instruction
-			    // Read the global variable
-			    LoadInst *restore_ret = new LoadInst(gvar, "", user_inst);
-			    // Find the uses of return value and replace them
-			    for (unsigned int i = 0; i < user_inst->getNumOperands(); i++) {
-				if (user_inst->getOperand(i) == call_inst) { 
-				    user_inst->setOperand(i, restore_ret);
-				}
-			    }
-			}
-		    }
-		}
-	    }
-
-	    // Insert management functions to recursive functions
 
 #ifdef DEBUG
-	    // Print out all the paths
-	    for (size_t i = 0; i < paths.size(); i++) {
-		for (size_t j = 0; j < paths[i].size(); j++) {
-		    if (paths[i][j]->second->getFunction())
-			errs() << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
-		    else
-			errs() << paths[i][j]->first << " " << "externalNode" << "\t";
+	    errs() << "}";
+#endif
+
+#ifdef DEBUG
+	    errs() << "}\n\n\n";
+#endif
+
+#ifdef DEBUG
+	    errs() << "Inserting management functions according to SSDM cuts: {\n";
+#endif
+
+	    // Step 4: Insert stack management functions
+	    // Decide the insertion points of stack management function according to SSDM output
+	    std::unordered_set <CallInst *> stack_management_insert_pts;
+	    for (auto cuti = cuts.begin(), cute = cuts.end(); cuti != cute; cuti++) {
+		for (size_t vi = 0; vi < cuti->second.size(); vi++) {
+		    unsigned i, j;
+		    std::string func_name;
+		    i = cuti->first;
+		    j = cuti->second[vi].first;
+		    func_name = cuti->second[vi].second;
+		    assert(paths[i][j]->first && paths[i][j]->second);
+		    CallInst *call_inst = dyn_cast<CallInst> (paths[i][j]->first);
+		    assert(call_inst);
+		    stack_management_insert_pts.insert(call_inst);
 		}
-		errs() << "\n";
+	    }
+	    
+	    // Insert stack management functions accroding to SSDM cuts
+	    for (auto si = stack_management_insert_pts.begin(), se = stack_management_insert_pts.end(); si != se; si++) {
+		CallInst *call_inst = *si;
+		// Insert stack management functions
+		stack_management_instrumentation(mod, call_inst);
 	    }
 
+#ifdef DEBUG
+	    errs() << "}\n";
+#endif
+
+	    // Step 4: Insert management functions at self-recursive calls
+#ifdef DEBUG
+	    errs() << "Inserting management functions around recursive calls... {\n";
+#endif
+	    for (std::unordered_set <CallGraphNode *>::iterator si = undecidable_cgns.begin(), se = undecidable_cgns.end(); si != se; si++) {
+		CallGraphNode * cgn = *si;
+		// Skip external nodes
+		if (!cgn->getFunction())
+		    continue;
+#ifdef DEBUG
+		errs() << cgn->getFunction()->getName() << "\n";
+#endif
+		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
+		    // Skip non-self-recursive calls
+		    if (cgni->second != cgn)
+			continue;
+		    CallInst *call_inst = dyn_cast<CallInst> (cgni->first);
+		    assert(call_inst);
+
+		    // Check if stack management functions have been inserted
+		    BasicBlock::iterator ii(call_inst);
+		    BasicBlock::iterator pos = ii;
+		    long k = 0;
+		    do {
+			if (pos == ii->getParent()->begin())
+			    break;
+			pos--;
+			k++;
+		    } while(k < 2);
+
+		    if (k >= 2) {
+			CallInst *call_inst = dyn_cast<CallInst>(pos);
+			if (call_inst && call_inst->getCalledFunction() == func_sstore)
+			    continue;
+		    }
+		    // Insert stack management functions
+		    stack_management_instrumentation(mod, call_inst);
+		}
+	    }
+
+#ifdef DEBUG
+	    errs() << "}\n";
 #endif
 
 	    // Step 4: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
@@ -430,8 +363,6 @@ namespace {
 		    }
 		}
 	    }
-
-
 
 	    return true;
 	}
