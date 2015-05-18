@@ -272,7 +272,7 @@ namespace {
 			else {
 			    // TODO Get library function stack sizes
 			    //errs() << func_name << "\n";
-			    ofs << std::numeric_limits<short>::max();
+			    ofs << std::numeric_limits<int>::max();
 			}
 			ofs << " ";
 			// Print edge weight (number of function calls)
