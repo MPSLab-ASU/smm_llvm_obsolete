@@ -27,6 +27,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/YAMLTraits.h"
@@ -34,7 +36,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
+#include <unordered_map>
 
 #include "FuncType.h"
 
@@ -120,19 +124,19 @@ namespace {
 
 	    // Create a function type for c_call it has not been created for corresponding function type
 	    if (!func_c_call) {
-		std::vector<Type*> c_call_params;
+		std::vector<Type*> c_call_args;
 		// The first parameter should be a char pointer to caller name
-		c_call_params.push_back(ptrTy_int8);
+		c_call_args.push_back(ptrTy_int8);
 		// The second parameter should be a char pointer to callee name
-		c_call_params.push_back(ptrTy_int8);
+		c_call_args.push_back(ptrTy_int8);
 		// The third parameter should be a callee function type pointer to callee address
-		c_call_params.push_back(calleeTyPtr);
+		c_call_args.push_back(calleeTyPtr);
 		// The following parameters should be the callee arguments if passed in
 		for (std::vector<Type*>::iterator ai = calleeArgTy.begin(), ae = calleeArgTy.end(); ai!=ae; ++ai)
-		    c_call_params.push_back(*ai);
+		    c_call_args.push_back(*ai);
 		FunctionType* funcTy = FunctionType::get(
 			retTy,
-			c_call_params,
+			c_call_args,
 			false);
 
 		func_c_call = Function::Create(
@@ -192,7 +196,7 @@ namespace {
 	    // Find out the SPM address for callee
 	   CallInst* callee_vma_int8 = CallInst::Create(func_c_get, callee_name, "callee_vma_int8", c_call_entry);
 	   // Cast the type of the SPM address to the function type of the callee
-	    CastInst* callee_vma = cast <CastInst> (builder.CreateBitCast(callee_vma_int8, calleeTyPtr)); 
+	    CastInst* callee_vma = cast <CastInst> (builder.CreateBitCast(callee_vma_int8, calleeTyPtr, "callee_vma")); 
 
 	    // Read callee arguments and get their values if passed in
 	    std::vector<Value*>callee_arg_vals;
@@ -202,13 +206,16 @@ namespace {
 	    }
 
 	    // Call the callee
-	    //CallInst* int32_call1 = CallInst::Create(callee_vma, callee_arg_vals, "", c_call_entry);
-	    CallInst* int32_call1 = builder.CreateCall(callee_vma, callee_arg_vals, "callee_vma");
+	    CallInst* callee_ret;
 
 	    // Get return value if its type is not void
 	    if (!retTy->isVoidTy()) {
-		builder.CreateStore(int32_call1, ret_val, false);
-	    } 
+		callee_ret = builder.CreateCall(callee_vma, callee_arg_vals, "callee_ret_val");
+		builder.CreateStore(callee_ret, ret_val, false);
+	    }
+	    else
+		callee_ret = builder.CreateCall(callee_vma, callee_arg_vals);
+
 
 	    // Ensure the caller is present after the callee returns
 	    CallInst::Create(func_c_get, caller_name, "caller_vma", c_call_entry);
@@ -227,13 +234,101 @@ namespace {
 
 
 	virtual bool runOnModule (Module &mod) {
-	    LLVMContext &context = mod.getContext();
-	    IRBuilder<> builder(context); // Instruction will be inserted before this instruction 
-	    //PointerType *ptrTy_int8 = PointerType::get(IntegerType::get(context, 8), 0);
-	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph(); // call graph
+	    int num_regions;
 
+	    std::vector<Value*> call_args;
+	    std::unordered_map <Function *, ConstantInt *> func2reg;
+	    std::unordered_map <Function *, std::pair <Value *, Value *>> func_load_addr;
+
+	    // LLVM context
+	    LLVMContext &context = mod.getContext();
+	    // IR builder
+	    IRBuilder<> builder(context);
+	    // Call graph
+	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph(); 
+
+	    // Types
+	    IntegerType *ty_int1 = builder.getInt1Ty();
+	    IntegerType *ty_int8 = builder.getInt8Ty();
+	    IntegerType *ty_int32 = builder.getInt32Ty();
+	    IntegerType *ty_int64 = builder.getInt64Ty();
+	    PointerType *ptrTy_int8 = builder.getInt8PtrTy();
+
+	    // External variables
+	    GlobalVariable* gvar_spm_begin = mod.getGlobalVariable("_spm_begin");
+	    if (!gvar_spm_begin) 
+		gvar_spm_begin = new GlobalVariable(mod, // Module 
+			ty_int8,
+			false, //isConstant 
+			GlobalValue::ExternalLinkage, // Linkage 
+			0, // Initializer 
+			"_spm_begin");
+
+
+	    // Functions
 	    Function *func_main = mod.getFunction("main");
-	    assert(func_main);
+	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
+	    Function* func_c_init_reg = mod.getFunction("c_init_reg");
+	    Function* func_c_init_map = mod.getFunction("c_init_map");
+
+
+	    Function* func_llvm_memcpy = mod.getFunction("llvm.memcpy.p0i8.p0i8.i64");
+	    if (!func_llvm_memcpy) {
+		std::vector<Type*> func_params;
+		func_params.push_back(ptrTy_int8);
+		func_params.push_back(ptrTy_int8);
+		func_params.push_back(ty_int64);
+		func_params.push_back(ty_int32);
+		func_params.push_back(ty_int1);
+		FunctionType* funcTy = FunctionType::get(
+			Type::getVoidTy(context),
+			func_params,
+			false);
+
+		func_llvm_memcpy = Function::Create(
+			funcTy,
+			GlobalValue::ExternalLinkage,
+			"llvm.memcpy.p0i8.p0i8.i64", &mod); // (external, no body)
+	    }
+
+	    assert(func_llvm_memcpy);
+
+
+
+	    // Code management related
+	    GlobalVariable* gvar_ptr_region_table = mod.getGlobalVariable("_region_table");
+	    assert(gvar_ptr_region_table);
+	    ConstantInt * const_num_regions = NULL;
+	    ConstantInt * const_num_mappings = NULL;
+
+	    // Step 0: Read in mappings that relate functions to regions
+
+	    std::ifstream ifs;
+	    ifs.open("mapping", std::fstream::in);
+	    assert(ifs.good());
+
+	    // Read function stack sizes
+	    DEBUG(errs() << "Reading SSDM output file...\n");
+	    DEBUG(errs() << "{\n");
+	    ifs >> num_regions;
+	    while (ifs.good()) {
+		int region_id;
+		std::string func_name;
+		ifs >> func_name >> region_id;
+		// Ignore white spaces after the last line
+		if (func_name != "") {
+		    Function *func;
+		    DEBUG(errs() << "\t" << func_name << " " << region_id << "\n");
+		    if (func_name == "main")
+			func_name = "smm_main";
+		    func = mod.getFunction(func_name);
+		    func2reg[func] = builder.getInt32(region_id);
+		}
+	    }
+	    
+	    ifs.close();
+
+	    // Step 1: Replace calls to user functions with calls to management functions
 	    // Check the potential callers
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
@@ -247,12 +342,40 @@ namespace {
 		    // Skip code management functions
 		    if (isCodeManagementFunction(fi))
 			continue;
-		    // Skip the main function
-		    if (fi == func_main)
-			continue;
+
+		    // Debug only
+		    //if (fi == func_main)
+			//continue;
+
 
 		    // User-defined caller functions
-		    DEBUG(errs() << fi->getName() <<"\n");
+		    std::string func_name = fi->getName().str();
+		    DEBUG(errs() << func_name <<"\n");
+
+		    // Create a seperate section and record the memory address range of the memory space it is loaded to, except the main function
+		    if (func_name != "main") {
+			if (fi->getSection() != "."+func_name)
+			    fi->setSection("."+func_name);
+			//DEBUG(errs() << fi->getSection() << "\n");
+
+			GlobalVariable* gvar_load_start = new GlobalVariable(mod, 
+				IntegerType::get(context, 8),
+				true, //isConstant
+				GlobalValue::ExternalLinkage,
+				0, // Initializer
+				"__load_start_" + func_name);
+
+			GlobalVariable* gvar_load_stop = new GlobalVariable(mod, 
+				IntegerType::get(context, 8), //Type
+				true, //isConstant
+				GlobalValue::ExternalLinkage, // Linkage
+				0, // Initializer
+				"__load_stop_" + func_name);
+			func_load_addr[fi] = std::make_pair(gvar_load_start, gvar_load_stop);
+		    } else
+			func_name = "smm_main";
+
+
 		    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
 			CallInst *call_inst = dyn_cast <CallInst> (cgni->first);
 			BasicBlock::iterator ii(call_inst);
@@ -277,37 +400,17 @@ namespace {
 			// If the caller calls an user-defined function
 			if (!isLibraryFunction(callee)) { 
 			    DEBUG(errs() << "\tcalls " << callee->getName() <<" (U)\n");
-			    //FunctionType* calleeTy = NULL;
-			    std::vector<Type*>calleeArgTy;
-			    // Get a pointer to the callee function type
-			    //calleeTy = callee->getFunctionType();
-			    // Get callee argument types if there are any
-			    for (unsigned int i = 0, num = call_inst->getNumArgOperands(); i < num; i++) {
-				calleeArgTy.push_back(call_inst->getArgOperand(i)->getType());
-			    }
 			    // Create a wrapper function for callee
-			    //Function *func_c_call = build_c_call(&mod, calleeTy, callee->getReturnType(), calleeArgTy);
 			    Function *func_c_call = build_c_call(call_inst);
-			    /*
-			    // Create a function pointer with the same type of the wrapper function to enforce absolute call
-			    PointerType* FuncTyPtr = PointerType::get(func_c_call->getFunctionType(), 0);
-			    AllocaInst* funcPtr = builder.CreateAlloca(FuncTyPtr, nullptr, "c_call_abs");
-			    // Copy the wrapper function address to the function pointer
-			    builder.CreateStore(func_c_call, funcPtr, false);
-			    // Read the value of the function pointer
-			    LoadInst* ldFuncPtr = builder.CreateLoad(funcPtr);
-			    */
 			    // Pass arguments to the pointer to the wraper function
 			    std::vector<Value*> call_args;
 
-			    Value *caller_name_ptr = builder.CreateGlobalStringPtr(fi->getName(), "caller.name");
-			    Value *callee_name_ptr = builder.CreateGlobalStringPtr(callee->getName(), "callee.name");
+			    Value *caller_name = builder.CreateGlobalStringPtr(func_name, "caller.name");
+			    Value *callee_name = builder.CreateGlobalStringPtr(callee->getName(), "callee.name");
 			    // Pass caller address with char* type as the first argument
-			    //Constant* int8_caller = ConstantExpr::getCast(Instruction::BitCast, fi, ptrTy_int8);
-			    //call_args.push_back(int8_caller);
-			    call_args.push_back(caller_name_ptr);
+			    call_args.push_back(caller_name);
 			    // Pass callee name as the second argument
-			    call_args.push_back(callee_name_ptr);
+			    call_args.push_back(callee_name);
 			    // Pass callee address as the third argument
 			    call_args.push_back(callee);
 			    // Pass callee arguments if there are any as the following arguments
@@ -315,10 +418,10 @@ namespace {
 				call_args.push_back(call_inst->getArgOperand(i));
 			    }
 			    // Create a new call instruction to the wrapper function
-			    //CallInst* call_c_call = CallInst::Create(ldFuncPtr, call_args);
 			    CallInst* call_c_call = CallInst::Create(func_c_call, call_args);
 			    // Replace all the uses of the original call instruction with the new call instruction
 			    ReplaceInstWithInst(call_inst->getParent()->getInstList(), ii, call_c_call);
+			    DEBUG(errs() << "\tcalls " << callee->getName() <<" (U)\n");
 			}
 			/*
 			else if (!callee->isIntrinsic()) {  // If the caller calls an librarfy function 
@@ -416,6 +519,93 @@ namespace {
 		    }
 		}
 	    }
+
+	    // Step 2: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
+	    // Create an external function called smm_main
+	    ValueToValueMapTy VMap;
+	    std::vector<Value*> main_args;
+	    // Set up the mapping between arguments of main to those of smm_main
+	    Function::arg_iterator ai_new = func_smm_main->arg_begin();
+	    for (Function::arg_iterator ai = func_main->arg_begin(), ae = func_main->arg_end(); ai != ae; ++ai) { 
+		ai_new->setName(ai->getName());
+		VMap[ai] = ai_new;
+		main_args.push_back(ai);
+		ai_new++;
+	    }
+	    // Copy the function body from main to smm_main
+	    SmallVector<ReturnInst*, 8> Returns;
+	    CloneFunctionInto(func_smm_main, func_main, VMap, true, Returns);
+	    // Delete all the basic blocks in main function
+	    std::vector<BasicBlock*> bb_list;
+	    for (Function::iterator bi = func_main->begin(), be = func_main->end();  bi!= be; ++bi) { 
+		for (BasicBlock::iterator ii = bi->begin(), ie = bi->end(); ii != ie; ++ii) {
+		    ii->dropAllReferences(); //Make sure there are no uses of any instruction
+		} 
+		bb_list.push_back(bi);
+	    }
+	    for (unsigned int i = 0; i < bb_list.size(); ++i) {
+		bb_list[i]->eraseFromParent();
+	    }
+	    // Create a seperate section for the smm_main function and record the memory address range of the memory space it is loaded to
+	    func_smm_main->setSection(".main");
+	    GlobalVariable* gvar_load_start_main = new GlobalVariable(mod, 
+		    IntegerType::get(context, 8),
+		    true, //isConstant
+		    GlobalValue::ExternalLinkage,
+		    0, // Initializer
+		    "__load_start_main");
+
+	    GlobalVariable* gvar_load_stop_main = new GlobalVariable(mod, 
+		    IntegerType::get(context, 8), //Type
+		    true, //isConstant
+		    GlobalValue::ExternalLinkage, // Linkage
+		    0, // Initializer
+		    "__load_stop_main");
+	    func_load_addr[func_smm_main] = std::make_pair(gvar_load_start_main, gvar_load_stop_main);  
+
+	    const_num_regions = builder.getInt32(num_regions);
+	    const_num_mappings = builder.getInt32(func_load_addr.size());
+
+	    // Create the new body of main function
+	    BasicBlock* main_entry = BasicBlock::Create(getGlobalContext(), "EntryBlock", func_main);
+	    builder.SetInsertPoint(main_entry);
+	    // Initalize regions
+	    builder.CreateCall(func_c_init_reg, const_num_regions, "");
+	    // Initialize mappings
+	    LoadInst* region_table = builder.CreateLoad(gvar_ptr_region_table);
+	    call_args.clear();
+	    call_args.push_back(const_num_mappings);
+	    for (auto ii = func_load_addr.begin(), ie = func_load_addr.end(); ii != ie; ii++) {
+		errs() << ii->first->getName() << "->" << ii->second.first->getName() << " " << ii->second.second->getName() << "\n";
+		Function *func = ii->first;
+		std::string func_name = func->getName();
+		call_args.push_back(builder.CreateGlobalString(func_name));
+		call_args.push_back(ii->second.first);
+		call_args.push_back(gvar_spm_begin);
+		call_args.push_back(builder.CreateSub(builder.CreatePtrToInt(ii->second.second, builder.getInt64Ty()), builder.CreatePtrToInt(ii->second.first, builder.getInt64Ty())));
+		call_args.push_back(builder.CreateGEP(region_table, func2reg[func]));
+	    }
+	    builder.CreateCall(func_c_init_map, call_args);
+	    // TODO Copy the code of the smm_main function
+
+
+	    Constant* func_smm_main_int8 = cast<Constant>(builder.CreateBitCast(func_smm_main, ptrTy_int8));
+	    ConstantInt * const_int32_10 = builder.getInt32(10);
+	    ConstantInt * const_int1_0 = builder.getInt1(0);
+
+	    call_args.clear();
+	    call_args.push_back(func_smm_main_int8);
+	    call_args.push_back(gvar_load_start_main);
+	    call_args.push_back(builder.CreateSub(builder.CreatePtrToInt(gvar_load_stop_main, builder.getInt64Ty()), \
+			builder.CreatePtrToInt(gvar_load_start_main, builder.getInt64Ty())));
+	    call_args.push_back(const_int32_10);
+	    call_args.push_back(const_int1_0);
+	    builder.CreateCall(func_llvm_memcpy, call_args);
+	    // Call the smm_main function
+	    builder.CreateCall(func_smm_main, main_args);
+	    // Return 
+	    Value *ret_val = builder.getInt32(0);
+	    builder.CreateRet(ret_val);
 
 	    return true;
 	}
