@@ -144,8 +144,8 @@ namespace {
 			GlobalValue::LinkOnceODRLinkage ,
 			"c_call", mod);
 		
-		errs() << *ptrTy_int8 << "\n";
-		errs() << *calleeTyPtr << "\n";
+		//errs() << *ptrTy_int8 << "\n";
+		//errs() << *calleeTyPtr << "\n";
 	    }
 
 	    assert(func_c_call);
@@ -308,8 +308,6 @@ namespace {
 	    assert(ifs.good());
 
 	    // Read function stack sizes
-	    DEBUG(errs() << "Reading SSDM output file...\n");
-	    DEBUG(errs() << "{\n");
 	    ifs >> num_regions;
 	    while (ifs.good()) {
 		int region_id;
@@ -318,7 +316,7 @@ namespace {
 		// Ignore white spaces after the last line
 		if (func_name != "") {
 		    Function *func;
-		    DEBUG(errs() << "\t" << func_name << " " << region_id << "\n");
+		    //DEBUG(errs() << "\t" << func_name << " " << region_id << "\n");
 		    if (func_name == "main")
 			func_name = "smm_main";
 		    func = mod.getFunction(func_name);
@@ -421,7 +419,6 @@ namespace {
 			    CallInst* call_c_call = CallInst::Create(func_c_call, call_args);
 			    // Replace all the uses of the original call instruction with the new call instruction
 			    ReplaceInstWithInst(call_inst->getParent()->getInstList(), ii, call_c_call);
-			    DEBUG(errs() << "\tcalls " << callee->getName() <<" (U)\n");
 			}
 			/*
 			else if (!callee->isIntrinsic()) {  // If the caller calls an librarfy function 
@@ -581,7 +578,8 @@ namespace {
 		std::string func_name = func->getName();
 		call_args.push_back(builder.CreateGlobalString(func_name));
 		call_args.push_back(ii->second.first);
-		call_args.push_back(gvar_spm_begin);
+		//call_args.push_back(gvar_spm_begin);
+		call_args.push_back(func);
 		call_args.push_back(builder.CreateSub(builder.CreatePtrToInt(ii->second.second, builder.getInt64Ty()), builder.CreatePtrToInt(ii->second.first, builder.getInt64Ty())));
 		call_args.push_back(builder.CreateGEP(region_table, func2reg[func]));
 	    }
@@ -606,7 +604,6 @@ namespace {
 	    // Return 
 	    Value *ret_val = builder.getInt32(0);
 	    builder.CreateRet(ret_val);
-
 	    return true;
 	}
 
