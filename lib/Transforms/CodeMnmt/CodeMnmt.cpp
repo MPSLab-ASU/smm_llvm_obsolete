@@ -35,9 +35,11 @@
 
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
+#include <unordered_set>
 #include <unordered_map>
 
 #include "FuncType.h"
@@ -294,17 +296,87 @@ namespace {
 	    assert(func_llvm_memcpy);
 
 
-
 	    // Code management related
 	    GlobalVariable* gvar_ptr_region_table = mod.getGlobalVariable("_region_table");
 	    assert(gvar_ptr_region_table);
 	    ConstantInt * const_num_regions = NULL;
 	    ConstantInt * const_num_mappings = NULL;
 
-	    // Step 0: Read in mappings that relate functions to regions
+	    /*
+	    CallGraphNode *cgn_root;
+	    std::vector<std::vector<CallGraphNode *> > paths;
+	    std::unordered_set <CallGraphNode *> undecidable_cgns;
 
+	    // Step 0: Get cost calulation graph 
+	    std::map<CallGraphNode*, std::vector<CallGraphNode *> > my_cg;
+	    // Get the reduced version of the call graph
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
+		    // Skip external nodes
+		    if(!cgn->getFunction())
+			continue;
+		    // Skip library functions
+		    if (isLibraryFunction(cgn->getFunction()))
+			continue;
+		    errs() << cgn->getFunction()->getName() << "\n";
+		    // Process user-defined functions
+
+
+		    std::set<CallGraphNode *> cgn_set;
+		    for (unsigned i = 0; i < cgn->size(); i++) {
+			CallGraphNode *called_cgn = (*cgn)[i];
+			cgn_set.insert(called_cgn);
+		    }
+
+		    for (auto ii = cgn_set.begin(), ie = cgn_set.end(); ii != ie; ii++){
+			my_cg[cgn].push_back(*ii);
+		    }
+		    for (unsigned i = 0; i < my_cg[cgn].size(); i++) {
+			Function *callee = my_cg[cgn][i]->getFunction();
+			if (callee)
+			    errs() << "\t" << callee->getName() << "\n";
+			else 
+			    errs() << "\texternal node\n";
+		    }
+		}
+	    }
+
+
+	    // Initialize root node by main function
+	    cgn_root = cg[mod.getFunction("main")];
+
+	    // Extract all the paths from call graph root at main function
+	    auto res = getPaths(cgn_root, my_cg);
+	    paths = res.first;
+	    undecidable_cgns = res.second;
+
+	    // Print out annotated WCG paths
+	    for (size_t i = 0; i < paths.size(); i++) {
+		//errs() << "path" << i << " : ";
+		for (size_t j = 0; j < paths[i].size(); j++) {
+		    if (paths[i][j]->getFunction()) {
+			std::string func_name = paths[i][j]->getFunction()->getName().str();
+			// Print node name (function name)
+			errs() << func_name << " ";
+					// Print edge weight (number of function calls)
+			if (j < paths[i].size()-1)
+			    errs() << "1";
+			else
+			    errs() << "0";
+			errs() << " ";
+		    }
+		    else {
+			errs() << "externalNode 0 ";
+		    }
+		}
+		errs() << "\n";
+	    }
+
+
+	    */
+	    // Step 1: Read in mappings that relate functions to regions
 	    std::ifstream ifs;
-	    ifs.open("mapping", std::fstream::in);
+	    ifs.open("_mapping", std::fstream::in);
 	    assert(ifs.good());
 
 	    // Read function stack sizes
@@ -326,7 +398,7 @@ namespace {
 	    
 	    ifs.close();
 
-	    // Step 1: Replace calls to user functions with calls to management functions
+	    // Step 2: Replace calls to user functions with calls to management functions
 	    // Check the potential callers
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
@@ -517,7 +589,7 @@ namespace {
 		}
 	    }
 
-	    // Step 2: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
+	    // Step 3: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
 	    ValueToValueMapTy VMap;
 	    std::vector<Value*> main_args;
