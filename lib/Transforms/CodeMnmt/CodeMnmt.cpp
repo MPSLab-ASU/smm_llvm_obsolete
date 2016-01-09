@@ -17,6 +17,7 @@
 #include "llvm/Pass.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CallGraph.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -33,9 +34,12 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/YAMLTraits.h"
 
+#include <cmath>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <set>
+#include <stack>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,6 +47,7 @@
 #include <unordered_map>
 
 #include "FuncType.h"
+#include "Graph.h"
 
 
 using namespace llvm;
@@ -54,6 +59,7 @@ namespace {
 
 	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
 	    AU.addRequired<CallGraphWrapperPass>();
+	    AU.addRequired<LoopInfo>();
 	}
 
 	// Build the wrapper function: retTy c_call(char *callerName, char *calleeName, calleeTy calleeAddr, ...)
@@ -97,7 +103,7 @@ namespace {
 		    FunctionType *fiTy = fi->getFunctionType();
 		    // Compare the return types
 		    FunctionType *fiCalleeTy = (FunctionType *)(((PointerType *)fiTy->getParamType(num_args_before-1))->getElementType());
-		    //errs() << *fiCalleeTy->getReturnType() <<"\n";
+		    //DEBUG(errs() << *fiCalleeTy->getReturnType() <<"\n");
 		    Type *fiCalleeRetTy = fiCalleeTy->getReturnType();
 		    if (retTy != fiCalleeRetTy ) {
 			continue;
@@ -146,8 +152,8 @@ namespace {
 			GlobalValue::LinkOnceODRLinkage ,
 			"c_call", mod);
 		
-		//errs() << *ptrTy_int8 << "\n";
-		//errs() << *calleeTyPtr << "\n";
+		//DEBUG(errs() << *ptrTy_int8 << "\n");
+		//DEBUG(errs() << *calleeTyPtr << "\n");
 	    }
 
 	    assert(func_c_call);
@@ -272,8 +278,6 @@ namespace {
 	    Function *func_smm_main = Function::Create(cast<FunctionType>(func_main->getType()->getElementType()), func_main->getLinkage(), "smm_main", &mod);
 	    Function* func_c_init_reg = mod.getFunction("c_init_reg");
 	    Function* func_c_init_map = mod.getFunction("c_init_map");
-
-
 	    Function* func_llvm_memcpy = mod.getFunction("llvm.memcpy.p0i8.p0i8.i64");
 	    if (!func_llvm_memcpy) {
 		std::vector<Type*> func_params;
@@ -292,90 +296,140 @@ namespace {
 			GlobalValue::ExternalLinkage,
 			"llvm.memcpy.p0i8.p0i8.i64", &mod); // (external, no body)
 	    }
-
 	    assert(func_llvm_memcpy);
 
 
 	    // Code management related
+	    CallGraphNode *cgn_main;
+	    CallGraphNode::CallRecord *root;
 	    GlobalVariable* gvar_ptr_region_table = mod.getGlobalVariable("_region_table");
 	    assert(gvar_ptr_region_table);
 	    ConstantInt * const_num_regions = NULL;
 	    ConstantInt * const_num_mappings = NULL;
+	    std::ifstream ifs;
+	    std::ofstream ofs;
+	    std::vector<CallGraphNode::CallRecord *> exec_trace;
+	    std::unordered_map <BasicBlock *, std::deque<CallGraphNode::CallRecord *> > calls_in_loops;
 
-	    /*
-	    CallGraphNode *cgn_root;
-	    std::vector<std::vector<CallGraphNode *> > paths;
-	    std::unordered_set <CallGraphNode *> undecidable_cgns;
-
-	    // Step 0: Get cost calulation graph 
-	    std::map<CallGraphNode*, std::vector<CallGraphNode *> > my_cg;
-	    // Get the reduced version of the call graph
-	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
-		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
-		    // Skip external nodes
-		    if(!cgn->getFunction())
-			continue;
-		    // Skip library functions
-		    if (isLibraryFunction(cgn->getFunction()))
-			continue;
-		    errs() << cgn->getFunction()->getName() << "\n";
-		    // Process user-defined functions
-
-
-		    std::set<CallGraphNode *> cgn_set;
-		    for (unsigned i = 0; i < cgn->size(); i++) {
-			CallGraphNode *called_cgn = (*cgn)[i];
-			cgn_set.insert(called_cgn);
-		    }
-
-		    for (auto ii = cgn_set.begin(), ie = cgn_set.end(); ii != ie; ii++){
-			my_cg[cgn].push_back(*ii);
-		    }
-		    for (unsigned i = 0; i < my_cg[cgn].size(); i++) {
-			Function *callee = my_cg[cgn][i]->getFunction();
-			if (callee)
-			    errs() << "\t" << callee->getName() << "\n";
-			else 
-			    errs() << "\texternal node\n";
-		    }
-		}
-	    }
-
-
-	    // Initialize root node by main function
-	    cgn_root = cg[mod.getFunction("main")];
+	    /* Get the execution trace: begin */
+	    cgn_main = cg[mod.getFunction("main")];
 
 	    // Extract all the paths from call graph root at main function
-	    auto res = getPaths(cgn_root, my_cg);
-	    paths = res.first;
-	    undecidable_cgns = res.second;
+	    // Initialize root node by main function
+	    for (CallGraphNode::iterator cgni = cg.begin()->second->begin(), cgne = cg.begin()->second->end(); cgni != cgne; cgni++) {
+		if (cgni->second == cgn_main) {
+		    root = &*cgni;
+		    break;
+		}
+	    }
+	    assert(CallGraphNode::iterator(root) != cg.begin()->second->end());
 
-	    // Print out annotated WCG paths
-	    for (size_t i = 0; i < paths.size(); i++) {
-		//errs() << "path" << i << " : ";
-		for (size_t j = 0; j < paths[i].size(); j++) {
-		    if (paths[i][j]->getFunction()) {
-			std::string func_name = paths[i][j]->getFunction()->getName().str();
-			// Print node name (function name)
-			errs() << func_name << " ";
-					// Print edge weight (number of function calls)
-			if (j < paths[i].size()-1)
-			    errs() << "1";
-			else
-			    errs() << "0";
-			errs() << " ";
-		    }
-		    else {
-			errs() << "externalNode 0 ";
+	    // Get the execution trace based on the call graph, starting from the main function
+	    exec_trace = getExecTrace(root);
+
+	    // Get the function calls within loops
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
+		    Function *fi = cgn->getFunction();
+		    // Skip external nodes (inline functions and function pointers)
+		    if(!fi)
+			continue;
+		    // Skip library functions
+		    if (isLibraryFunction(fi))
+			continue;
+		    // Skip code management functions
+		    if (isCodeManagementFunction(fi))
+			continue;
+		    LoopInfo &lpi = getAnalysis<LoopInfo>(*fi);
+		    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
+			CallInst *call_inst = dyn_cast <CallInst> (cgni->first);
+			CallGraphNode *called_cgn = dyn_cast <CallGraphNode> (cgni->second);
+			assert(call_inst && called_cgn);
+			Loop* lp = lpi.getLoopFor(call_inst->getParent());
+			// Include function calls within child loops as function calls in current loop
+			while (lp) {
+			    BasicBlock *lp_header = lp->getHeader();
+			    calls_in_loops[lp_header].push_back(&*cgni);
+			    lp = lp->getParentLoop();
+			}
 		    }
 		}
-		errs() << "\n";
 	    }
+	    /*
+	       for (auto ii = calls_in_loops.begin(), ie = calls_in_loops.end(); ii != ie; ii++) {
+	       BasicBlock *lp_header = ii->first;
+	       errs() << lp_header->getParent()->getName() << " " << lp_header << "\n";
+	       errs() << "\t";
+	       for (auto ji = ii->second.begin(), je = ii->second.end(); ji != je; ji++) {
+	       errs() << "\t" << *((*ji)->first) << "\n";
+	       }
+	       errs() << "\n";
+	       }
+	     */
 
+	    // Print the execution trace with loop information
+	    errs() << "Printing the execution trace:\n";
+	    ofs.open ("_exec_trace", std::ofstream::out | std::ofstream::trunc);
+	    long int lp_nest = 0;
+	    for (size_t i = 0; i < exec_trace.size(); i++) {
+		CallGraphNode::CallRecord *call_record = exec_trace[i];
+		assert(call_record);
+		CallGraphNode *called_cgn = call_record->second;
+		Function *callee = called_cgn->getFunction();
+		
+		if (call_record->first) {
+		    CallInst *call_inst = dyn_cast <CallInst> (call_record->first);
+		    BasicBlock *call_bb = call_inst->getParent();
+		    Function *caller = call_bb->getParent();
+		    LoopInfo &lpi = getAnalysis<LoopInfo>(*caller);
+		    Loop *lp = lpi.getLoopFor(call_bb);
+		    std::stack <BasicBlock *> lp_stack;
 
-	    */
-	    // Step 1: Read in mappings that relate functions to regions
-	    std::ifstream ifs;
+		    // Print out loop start
+		    while (lp) {
+			BasicBlock *lp_header = lp->getHeader(); 
+			if (i > 0) {
+			    CallGraphNode * prev_cgn = dyn_cast<CallGraphNode>(exec_trace[i-1]->second);
+			    if (prev_cgn->getFunction() == lp_header->getParent() && call_record == calls_in_loops[lp_header].front()) {
+				lp_stack.push(lp_header);
+			    }
+			}
+			lp = lp->getParentLoop();
+		    }
+
+		    while (lp_stack.size() > 0) {
+			++lp_nest;
+			ofs << "{" << lp_stack.top() << " " << lp_nest << " ";
+			lp_stack.pop();
+		    }
+
+		    // Print out function visited and its number of execution
+		    ofs << callee->getName().str() << " ";
+		    lp = lpi.getLoopFor(call_bb);
+
+		    // Print out loop start
+		    while (lp) {
+			BasicBlock *lp_header = lp->getHeader(); 
+			if (i < exec_trace.size()-1) {
+			    CallGraphNode * next_cgn = dyn_cast<CallGraphNode>(exec_trace[i+1]->second);
+			    if (call_record == calls_in_loops[lp_header].back() && next_cgn->getFunction() == lp_header->getParent()) {
+				ofs << lp_header << " " << lp_nest << "}" << " ";
+				--lp_nest;
+				assert(lp_nest >= 0);
+			    }
+			} 
+			lp = lp->getParentLoop();
+		    }
+		}
+		else
+		    ofs << callee->getName().str() << " ";
+	    } 
+
+	    ofs << "\n";
+
+	    /* Get the execution trace: end */
+
+	    /* Read in mappings that relate functions to regions: begin */
 	    ifs.open("_mapping", std::fstream::in);
 	    assert(ifs.good());
 
@@ -395,10 +449,12 @@ namespace {
 		    func2reg[func] = builder.getInt32(region_id);
 		}
 	    }
-	    
+
 	    ifs.close();
 
-	    // Step 2: Replace calls to user functions with calls to management functions
+	    /* Read in mappings that relate functions to regions: end */
+
+	    /* Replace calls to user functions with calls to management functions: begin */
 	    // Check the potential callers
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
@@ -415,7 +471,7 @@ namespace {
 
 		    // Debug only
 		    //if (fi == func_main)
-			//continue;
+		    //continue;
 
 
 		    // User-defined caller functions
@@ -493,103 +549,105 @@ namespace {
 			    ReplaceInstWithInst(call_inst->getParent()->getInstList(), ii, call_c_call);
 			}
 			/*
-			else if (!callee->isIntrinsic()) {  // If the caller calls an librarfy function 
-			    DEBUG(errs() << "\tcalls " << callee->getName() <<" (L)\n");
-			    // Create a function pointer with the same type of callee to enforce absolute call
-			    PointerType* FuncTyPtr = PointerType::get(callee->getFunctionType(), 0);
-			    AllocaInst* funcPtr = builder.CreateAlloca(FuncTyPtr, nullptr, callee->getName() + "_ptr");
-			    // Copy the callee address to the function pointer
-			    builder.CreateStore(callee, funcPtr, false);
-			    // Read the value of the function pointer
-			    LoadInst* ldFuncPtr = builder.CreateLoad(funcPtr); 
+			   else if (!callee->isIntrinsic()) {  // If the caller calls an librarfy function 
+			   DEBUG(errs() << "\tcalls " << callee->getName() <<" (L)\n");
+			// Create a function pointer with the same type of callee to enforce absolute call
+			PointerType* FuncTyPtr = PointerType::get(callee->getFunctionType(), 0);
+			AllocaInst* funcPtr = builder.CreateAlloca(FuncTyPtr, nullptr, callee->getName() + "_ptr");
+			// Copy the callee address to the function pointer
+			builder.CreateStore(callee, funcPtr, false);
+			// Read the value of the function pointer
+			LoadInst* ldFuncPtr = builder.CreateLoad(funcPtr); 
 
-			    // Pass arguments of the callee to the function pointer if there are any
-			    std::vector<Value*> call_args;
-			    for (unsigned int i = 0, num = call_inst->getNumArgOperands(); i < num; i++) {
-				call_args.push_back(call_inst->getArgOperand(i));
-			    }
-			    // Create a new call instruction with the function pointer
-			    CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args);
-			    // Replace all the uses of the original call instruction with the new call instruction
-			    ReplaceInstWithInst(call_inst->getParent()->getInstList(), ii, callFuncPtr);
-			} else { // If the caller calls an intrinsic function
-			    StringRef callee_libc_name = callee->getName().split('.').second.split('.').first;
-			    DEBUG(errs() << "\tcalls " << callee_libc_name <<" (I)\n");
-			    if (callee_libc_name.startswith("mem")) {
-				Function *callee_libc = mod.getFunction(callee_libc_name);
-				if (!callee_libc) {
-				    if (callee_libc_name == "memcpy") {
-					std::vector<Type*>FuncTy_args;
-					FuncTy_args.push_back(ptrTy_int8);
-					FuncTy_args.push_back(ptrTy_int8);
-					FuncTy_args.push_back(IntegerType::get(context, 64));
-					FunctionType* FuncTy = FunctionType::get(
-						ptrTy_int8,
-						FuncTy_args,
-						false);
-
-					callee_libc = Function::Create(
-						FuncTy,
-						GlobalValue::ExternalLinkage,
-						"memcpy", &mod); 
-					callee_libc->setCallingConv(CallingConv::C);
-				    }
-				    else if (callee_libc_name == "memset") {
-					std::vector<Type*>FuncTy_args;
-					FuncTy_args.push_back(ptrTy_int8);
-					FuncTy_args.push_back(IntegerType::get(context, 32));
-					FuncTy_args.push_back(IntegerType::get(context, 64));
-					FunctionType* FuncTy = FunctionType::get(
-						ptrTy_int8,
-						FuncTy_args,
-						false);
-
-					callee_libc = Function::Create(
-						FuncTy,
-						GlobalValue::ExternalLinkage,
-						"memset", &mod); 
-					callee_libc->setCallingConv(CallingConv::C);
-				    }
-				}
-				assert(callee_libc);
-
-				// Create a function pointer with the same type of callee to enforce absolute call
-				PointerType* FuncTyPtr = PointerType::get(callee_libc->getFunctionType(), 0);
-
-				//AllocaInst* funcPtr = new AllocaInst(FuncTyPtr, callee_libc->getName() + "_ptr", inst);
-				//funcPtr->setAlignment(8);
-				AllocaInst* funcPtr = builder.CreateAlloca(FuncTyPtr, nullptr, callee_libc->getName() + "_ptr");
-				// Copy the callee address to the function pointer
-				//StoreInst* stFuncPtr = new StoreInst(callee_libc, funcPtr, false, inst);
-				//stFuncPtr->setAlignment(8); 
-				builder.CreateStore(callee_libc, funcPtr);
-				// Read the value of the function pointer
-				//LoadInst* ldFuncPtr = new LoadInst(funcPtr, "", false, inst);
-				//ldFuncPtr->setAlignment(8); 
-				LoadInst* ldFuncPtr = builder.CreateLoad(funcPtr);
-				// Pass arguments of the callee to the function pointer if there are any
-				std::vector<Value*> call_args;
-				for (unsigned int i = 0, num = callee_libc->getFunctionType()->getNumParams(); i < num; i++) {
-				    //errs() << callee_libc->getFunctionType()->getParamType(i) << " " << inst->getArgOperand(i) <<"\n";
-				    call_args.push_back(call_inst->getArgOperand(i));
-				}
-				//CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args);
-				//ReplaceInstWithInst(ii->getParent()->getInstList(), ii, callFuncPtr);
-				// Create a new call instruction with the function pointer
-				//CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args, "", call_inst);
-				builder.CreateCall(ldFuncPtr, call_args, "");
-				// Move iterator one instruction back so its value will not be nullified. After this step the iterator is guaranteed to be valid, since we have inserted instructions before
-				ii--;
-				// Remove the original call instruction since llvm.memcpy has a void return type
-				call_inst->eraseFromParent();
-			    }
+			// Pass arguments of the callee to the function pointer if there are any
+			std::vector<Value*> call_args;
+			for (unsigned int i = 0, num = call_inst->getNumArgOperands(); i < num; i++) {
+			call_args.push_back(call_inst->getArgOperand(i));
 			}
+			// Create a new call instruction with the function pointer
+			CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args);
+			// Replace all the uses of the original call instruction with the new call instruction
+			ReplaceInstWithInst(call_inst->getParent()->getInstList(), ii, callFuncPtr);
+			} else { // If the caller calls an intrinsic function
+			StringRef callee_libc_name = callee->getName().split('.').second.split('.').first;
+			DEBUG(errs() << "\tcalls " << callee_libc_name <<" (I)\n");
+			if (callee_libc_name.startswith("mem")) {
+			Function *callee_libc = mod.getFunction(callee_libc_name);
+			if (!callee_libc) {
+			if (callee_libc_name == "memcpy") {
+			std::vector<Type*>FuncTy_args;
+			FuncTy_args.push_back(ptrTy_int8);
+			FuncTy_args.push_back(ptrTy_int8);
+			FuncTy_args.push_back(IntegerType::get(context, 64));
+			FunctionType* FuncTy = FunctionType::get(
+			ptrTy_int8,
+			FuncTy_args,
+			false);
+
+			callee_libc = Function::Create(
+			FuncTy,
+			GlobalValue::ExternalLinkage,
+			"memcpy", &mod); 
+			callee_libc->setCallingConv(CallingConv::C);
+			}
+			else if (callee_libc_name == "memset") {
+			std::vector<Type*>FuncTy_args;
+			FuncTy_args.push_back(ptrTy_int8);
+			FuncTy_args.push_back(IntegerType::get(context, 32));
+			FuncTy_args.push_back(IntegerType::get(context, 64));
+			FunctionType* FuncTy = FunctionType::get(
+			ptrTy_int8,
+			FuncTy_args,
+			false);
+
+			callee_libc = Function::Create(
+			FuncTy,
+			GlobalValue::ExternalLinkage,
+			"memset", &mod); 
+			callee_libc->setCallingConv(CallingConv::C);
+			}
+			}
+			assert(callee_libc);
+
+			// Create a function pointer with the same type of callee to enforce absolute call
+			PointerType* FuncTyPtr = PointerType::get(callee_libc->getFunctionType(), 0);
+
+			//AllocaInst* funcPtr = new AllocaInst(FuncTyPtr, callee_libc->getName() + "_ptr", inst);
+			//funcPtr->setAlignment(8);
+			AllocaInst* funcPtr = builder.CreateAlloca(FuncTyPtr, nullptr, callee_libc->getName() + "_ptr");
+			// Copy the callee address to the function pointer
+			//StoreInst* stFuncPtr = new StoreInst(callee_libc, funcPtr, false, inst);
+			//stFuncPtr->setAlignment(8); 
+			builder.CreateStore(callee_libc, funcPtr);
+			// Read the value of the function pointer
+			//LoadInst* ldFuncPtr = new LoadInst(funcPtr, "", false, inst);
+			//ldFuncPtr->setAlignment(8); 
+			LoadInst* ldFuncPtr = builder.CreateLoad(funcPtr);
+			// Pass arguments of the callee to the function pointer if there are any
+			std::vector<Value*> call_args;
+			for (unsigned int i = 0, num = callee_libc->getFunctionType()->getNumParams(); i < num; i++) {
+			    //DEBUG(errs() << callee_libc->getFunctionType()->getParamType(i) << " " << inst->getArgOperand(i) <<"\n");
+			    call_args.push_back(call_inst->getArgOperand(i));
+			}
+			//CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args);
+			//ReplaceInstWithInst(ii->getParent()->getInstList(), ii, callFuncPtr);
+			// Create a new call instruction with the function pointer
+			//CallInst* callFuncPtr = CallInst::Create(ldFuncPtr, call_args, "", call_inst);
+			builder.CreateCall(ldFuncPtr, call_args, "");
+			// Move iterator one instruction back so its value will not be nullified. After this step the iterator is guaranteed to be valid, since we have inserted instructions before
+			ii--;
+			// Remove the original call instruction since llvm.memcpy has a void return type
+			call_inst->eraseFromParent();
+		}
+		}
 		*/
 		    }
 		}
 	    }
 
-	    // Step 3: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
+	    /* Replace calls to user functions with calls to management functions: end */
+
+	    /* Transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last): begin */
 	    // Create an external function called smm_main
 	    ValueToValueMapTy VMap;
 	    std::vector<Value*> main_args;
@@ -645,19 +703,16 @@ namespace {
 	    call_args.clear();
 	    call_args.push_back(const_num_mappings);
 	    for (auto ii = func_load_addr.begin(), ie = func_load_addr.end(); ii != ie; ii++) {
-		errs() << ii->first->getName() << "->" << ii->second.first->getName() << " " << ii->second.second->getName() << "\n";
+		DEBUG(errs() << ii->first->getName() << "->" << ii->second.first->getName() << " " << ii->second.second->getName() << "\n");
 		Function *func = ii->first;
 		std::string func_name = func->getName();
 		call_args.push_back(builder.CreateGlobalString(func_name));
 		call_args.push_back(ii->second.first);
-		//call_args.push_back(gvar_spm_begin);
 		call_args.push_back(func);
 		call_args.push_back(builder.CreateSub(builder.CreatePtrToInt(ii->second.second, builder.getInt64Ty()), builder.CreatePtrToInt(ii->second.first, builder.getInt64Ty())));
 		call_args.push_back(builder.CreateGEP(region_table, func2reg[func]));
 	    }
 	    builder.CreateCall(func_c_init_map, call_args);
-	    // TODO Copy the code of the smm_main function
-
 
 	    Constant* func_smm_main_int8 = cast<Constant>(builder.CreateBitCast(func_smm_main, ptrTy_int8));
 	    ConstantInt * const_int32_10 = builder.getInt32(10);
@@ -676,6 +731,8 @@ namespace {
 	    // Return 
 	    Value *ret_val = builder.getInt32(0);
 	    builder.CreateRet(ret_val);
+	    /* Transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last): begin */
+
 	    return true;
 	}
 
