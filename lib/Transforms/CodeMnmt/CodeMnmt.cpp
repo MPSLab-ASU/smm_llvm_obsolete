@@ -47,7 +47,6 @@
 #include <unordered_map>
 
 #include "FuncType.h"
-#include "Graph.h"
 
 
 using namespace llvm;
@@ -300,134 +299,15 @@ namespace {
 
 
 	    // Code management related
-	    CallGraphNode *cgn_main;
-	    CallGraphNode::CallRecord *root;
 	    GlobalVariable* gvar_ptr_region_table = mod.getGlobalVariable("_region_table");
 	    assert(gvar_ptr_region_table);
 	    ConstantInt * const_num_regions = NULL;
 	    ConstantInt * const_num_mappings = NULL;
 	    std::ifstream ifs;
-	    std::ofstream ofs;
+	    //std::ofstream ofs;
 	    std::vector<CallGraphNode::CallRecord *> exec_trace;
 	    std::unordered_map <BasicBlock *, std::deque<CallGraphNode::CallRecord *> > calls_in_loops;
 
-	    /* Get the execution trace: begin */
-	    cgn_main = cg[mod.getFunction("main")];
-
-	    // Extract all the paths from call graph root at main function
-	    // Initialize root node by main function
-	    for (CallGraphNode::iterator cgni = cg.begin()->second->begin(), cgne = cg.begin()->second->end(); cgni != cgne; cgni++) {
-		if (cgni->second == cgn_main) {
-		    root = &*cgni;
-		    break;
-		}
-	    }
-	    assert(CallGraphNode::iterator(root) != cg.begin()->second->end());
-
-	    // Get the execution trace based on the call graph, starting from the main function
-	    exec_trace = getExecTrace(root);
-
-	    // Get the function calls within loops
-	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
-		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
-		    Function *fi = cgn->getFunction();
-		    // Skip external nodes (inline functions and function pointers)
-		    if(!fi)
-			continue;
-		    // Skip library functions
-		    if (isLibraryFunction(fi))
-			continue;
-		    // Skip code management functions
-		    if (isCodeManagementFunction(fi))
-			continue;
-		    LoopInfo &lpi = getAnalysis<LoopInfo>(*fi);
-		    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
-			CallInst *call_inst = dyn_cast <CallInst> (cgni->first);
-			CallGraphNode *called_cgn = dyn_cast <CallGraphNode> (cgni->second);
-			assert(call_inst && called_cgn);
-			Loop* lp = lpi.getLoopFor(call_inst->getParent());
-			// Include function calls within child loops as function calls in current loop
-			while (lp) {
-			    BasicBlock *lp_header = lp->getHeader();
-			    calls_in_loops[lp_header].push_back(&*cgni);
-			    lp = lp->getParentLoop();
-			}
-		    }
-		}
-	    }
-	    /*
-	       for (auto ii = calls_in_loops.begin(), ie = calls_in_loops.end(); ii != ie; ii++) {
-	       BasicBlock *lp_header = ii->first;
-	       errs() << lp_header->getParent()->getName() << " " << lp_header << "\n";
-	       errs() << "\t";
-	       for (auto ji = ii->second.begin(), je = ii->second.end(); ji != je; ji++) {
-	       errs() << "\t" << *((*ji)->first) << "\n";
-	       }
-	       errs() << "\n";
-	       }
-	     */
-
-	    // Print the execution trace with loop information
-	    errs() << "Printing the execution trace:\n";
-	    ofs.open ("_exec_trace", std::ofstream::out | std::ofstream::trunc);
-	    long int lp_nest = 0;
-	    for (size_t i = 0; i < exec_trace.size(); i++) {
-		CallGraphNode::CallRecord *call_record = exec_trace[i];
-		assert(call_record);
-		CallGraphNode *called_cgn = call_record->second;
-		Function *callee = called_cgn->getFunction();
-		
-		if (call_record->first) {
-		    CallInst *call_inst = dyn_cast <CallInst> (call_record->first);
-		    BasicBlock *call_bb = call_inst->getParent();
-		    Function *caller = call_bb->getParent();
-		    LoopInfo &lpi = getAnalysis<LoopInfo>(*caller);
-		    Loop *lp = lpi.getLoopFor(call_bb);
-		    std::stack <BasicBlock *> lp_stack;
-
-		    // Print out loop start
-		    while (lp) {
-			BasicBlock *lp_header = lp->getHeader(); 
-			if (i > 0) {
-			    CallGraphNode * prev_cgn = dyn_cast<CallGraphNode>(exec_trace[i-1]->second);
-			    if (prev_cgn->getFunction() == lp_header->getParent() && call_record == calls_in_loops[lp_header].front()) {
-				lp_stack.push(lp_header);
-			    }
-			}
-			lp = lp->getParentLoop();
-		    }
-
-		    while (lp_stack.size() > 0) {
-			++lp_nest;
-			ofs << "{" << lp_stack.top() << " " << lp_nest << " ";
-			lp_stack.pop();
-		    }
-
-		    // Print out function visited and its number of execution
-		    ofs << callee->getName().str() << " ";
-		    lp = lpi.getLoopFor(call_bb);
-
-		    // Print out loop start
-		    while (lp) {
-			BasicBlock *lp_header = lp->getHeader(); 
-			if (i < exec_trace.size()-1) {
-			    CallGraphNode * next_cgn = dyn_cast<CallGraphNode>(exec_trace[i+1]->second);
-			    if (call_record == calls_in_loops[lp_header].back() && next_cgn->getFunction() == lp_header->getParent()) {
-				ofs << lp_header << " " << lp_nest << "}" << " ";
-				--lp_nest;
-				assert(lp_nest >= 0);
-			    }
-			} 
-			lp = lp->getParentLoop();
-		    }
-		}
-		else
-		    ofs << callee->getName().str() << " ";
-	    } 
-
-	    ofs << "\n";
-
-	    /* Get the execution trace: end */
 
 	    /* Read in mappings that relate functions to regions: begin */
 	    ifs.open("_mapping", std::fstream::in);
@@ -439,6 +319,8 @@ namespace {
 		int region_id;
 		std::string func_name;
 		ifs >> func_name >> region_id;
+		if (func_name.empty())
+		    continue;
 		// Ignore white spaces after the last line
 		if (func_name != "") {
 		    Function *func;
@@ -455,11 +337,54 @@ namespace {
 	    /* Read in mappings that relate functions to regions: end */
 
 	    /* Replace calls to user functions with calls to management functions: begin */
+
+	    // Create a seperate section for each user function and record the memory address range of the memory space it is loaded to, except the main function
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
+		    Function *fi = cgn->getFunction();
+		    // Skip external nodes (inline asm and function pointers)
+		    if(!fi)
+			continue;
+		    // Skip code management functions
+		    if (isCodeManagementFunction(fi))
+			continue;
+		    // Skip library functions
+		    if (isLibraryFunction(fi))
+			continue;
+
+		    std::string func_name = fi->getName().str();
+		    //DEBUG(errs() << func_name <<"\n");
+
+		    if (func_name != "main") {
+			if (fi->getSection() != "."+func_name)
+			    fi->setSection("."+func_name);
+			//DEBUG(errs() << fi->getSection() << "\n");
+
+			GlobalVariable* gvar_load_start = new GlobalVariable(mod, 
+				IntegerType::get(context, 8),
+				true, //isConstant
+				GlobalValue::ExternalLinkage,
+				0, // Initializer
+				"__load_start_" + func_name);
+
+			GlobalVariable* gvar_load_stop = new GlobalVariable(mod, 
+				IntegerType::get(context, 8), //Type
+				true, //isConstant
+				GlobalValue::ExternalLinkage, // Linkage
+				0, // Initializer
+				"__load_stop_" + func_name);
+			func_load_addr[fi] = std::make_pair(gvar_load_start, gvar_load_stop);
+		    } else
+			func_name = "smm_main";
+		}
+	    }
+
+
 	    // Check the potential callers
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		if(CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second)) {
 		    Function *fi = cgn->getFunction();
-		    // Skip external nodes
+		    // Skip external nodes (inline asm and function pointers)
 		    if(!fi)
 			continue;
 		    // Skip library functions
@@ -478,6 +403,8 @@ namespace {
 		    std::string func_name = fi->getName().str();
 		    DEBUG(errs() << func_name <<"\n");
 
+
+		    /*
 		    // Create a seperate section and record the memory address range of the memory space it is loaded to, except the main function
 		    if (func_name != "main") {
 			if (fi->getSection() != "."+func_name)
@@ -500,6 +427,7 @@ namespace {
 			func_load_addr[fi] = std::make_pair(gvar_load_start, gvar_load_stop);
 		    } else
 			func_name = "smm_main";
+			*/
 
 
 		    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
@@ -511,9 +439,11 @@ namespace {
 
 			builder.SetInsertPoint(call_inst);
 			// Skip inline assembly
-			if (call_inst->isInlineAsm())
-			    continue;
+			//if (call_inst->isInlineAsm())
+			    //continue;
 			// Skip calls to function pointers
+
+			// Skip external nodes (inline asm and function pointers)
 			if (!callee) 
 			    continue;
 			// Skip calls to management functions
