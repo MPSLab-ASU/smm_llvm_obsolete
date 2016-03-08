@@ -1,5 +1,5 @@
-#ifndef __MYFUNCTION_H__
-#define __MYFUNCION_H__
+#ifndef __FUNCTYPE_H__
+#define __FUNCTYPE_H__
 
 #include "llvm/IR/Function.h"
 

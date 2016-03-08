@@ -25,6 +25,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Debug.h"
 
 #include <fstream>
 #include <queue>
@@ -33,20 +34,20 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "function.h"
-#include "graph.h"
-#include "instrumentation.h"
+#include "FuncType.h"
+#include "Graph.h"
+#include "Instrumentation.h"
 
-#define DEBUG
+#define DEBUG_TYPE "smmssm"
 
 using namespace llvm;
 
 namespace {
 
-    struct SmartStackManagementPass : public ModulePass {
+    struct StackManagementPass : public ModulePass {
 	static char ID; // Pass identification, replacement for typeid
 
-	SmartStackManagementPass() : ModulePass(ID) {
+	StackManagementPass() : ModulePass(ID) {
 	}
 
 	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
@@ -112,21 +113,21 @@ namespace {
 	    // Step 0: Extarct all the paths from call graph rooted at main function
 	    auto res = extractPaths(root);
 	    paths = res.first;
-	    undecidable_cgns = res.second;
-#ifdef DEBUG
-	    errs() <<  "Extract paths {\n";
+	    undecidable_cgns = res.second; 
+
+	    DEBUG(errs() <<  "Extract paths {\n");
 	    // Print out all the paths
 	    for (size_t i = 0; i < paths.size(); i++) {
 		for (size_t j = 0; j < paths[i].size(); j++) {
-		    if (paths[i][j]->second->getFunction())
-			errs() << "\t" << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t";
-		    else
-			errs() << "\t" << paths[i][j]->first << " " << "externalNode" << "\t";
+		    if (paths[i][j]->second->getFunction()) {
+			DEBUG(errs() << "\t" << paths[i][j]->first << " " << paths[i][j]->second->getFunction()->getName() << "\t");
+		    } else {
+			DEBUG(errs() << "\t" << paths[i][j]->first << " " << "externalNode" << "\t");
+		    }
 		}
-		errs() << "\n";
+		DEBUG(errs() << "\n");
 	    }
-	    errs() << "}\n\n";
-#endif
+	    DEBUG(errs() << "}\n\n");
 
 	    // Step 1: get SSMD cuts
 	    std::unordered_map <unsigned, std::vector <std::pair<unsigned, std::string> > > cuts;
@@ -135,52 +136,38 @@ namespace {
 	    ifs.open("wcg_cuts.txt", std::fstream::in);
 	    assert(ifs.good());
 	    // Read function stack sizes
-#ifdef DEBUG
-	    errs() << "Reading SSDM output file...\n";
-	    errs() << "{\n";
-#endif
+	    DEBUG(errs() << "Reading SSDM output file...\n");
+	    DEBUG(errs() << "{\n");
 	    while (ifs.good()) {
 		unsigned i, j;
 		std::string func_name;
 		ifs >> i >> j >> func_name;
 		// Ignore white spaces after the last line
 		if (func_name != "") {
-#ifdef DEBUG		    
-		    errs() << "\t" << i << " " << j << " " << func_name << "\n";
-#endif
+		    DEBUG(errs() << "\t" << i << " " << j << " " << func_name << "\n");
 		    cuts[i-1].push_back( std::make_pair(j-1, func_name) );
 		}
 	    }
 	    ifs.close();
 
-#ifdef DEBUG
-	    errs() << "}\n\n\n";
-	    errs() << "Sorting SSDM cuts according to paths...\n";
-	    errs() << "{\n";
-#endif
+	    DEBUG(errs() << "}\n\n\n");
+	    DEBUG(errs() << "Sorting SSDM cuts according to paths...\n");
+	    DEBUG(errs() << "{\n");
 
 	    // Sort cuts acoording to paths
 	    for (auto cutsi = cuts.begin(), cutse = cuts.end(); cutsi != cutse; cutsi++) {
 		std::sort(cutsi->second.begin(), cutsi->second.end());
-#ifdef DEBUG
-		errs() << "\tpath " << cutsi->first << " : ";
-		for (size_t i = 0; i < cutsi->second.size(); i++)
-		    errs() << cutsi->second[i].first << " " << cutsi->second[i].second << "  ";
-		errs() << "\n";
-#endif
+		DEBUG(errs() << "\tpath " << cutsi->first << " : ");
+		for (size_t i = 0; i < cutsi->second.size(); i++) {
+		    DEBUG(errs() << cutsi->second[i].first << " " << cutsi->second[i].second << "  ");
+		}
+		DEBUG(errs() << "\n");
 	    }
-#ifdef DEBUG
-	    errs() << "}\n\n\n";
-#endif
+	    DEBUG(errs() << "}\n\n\n");
 
 
-#ifdef DEBUG
-	    errs() << "Pointer management functions instrumentation {\n";
-#endif
-
-#ifdef DEBUG
-	    errs() << "Inserting g2l functions... {\n";
-#endif
+	    DEBUG(errs() << "Pointer management functions instrumentation {\n");
+	    DEBUG(errs() << "Inserting g2l functions... {\n");
 	    // Step 2: Insert g2l function calls
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		CallGraphNode *cgn = cgi->second;
@@ -200,13 +187,9 @@ namespace {
 		// Process user-defined functions
 		g2l_pointer_management_instrumentation(mod, cgn);
 	    }
-#ifdef DEBUG
-	    errs() << "}";
-#endif
+	    DEBUG(errs() << "}\n");
 
-#ifdef DEBUG
-	    errs() << "Inserting l2g functions: {\n";
-#endif
+	    DEBUG(errs() << "Inserting l2g functions: {\n");
 	    // Step 3: Insert l2g functions
 	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
 		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second); 
@@ -214,9 +197,8 @@ namespace {
 		// Skip external nodes
 		if (!fi)
 		    continue;
-#ifdef DEBUG
-		errs() << "\t" << fi->getName() << "\n";
-#endif
+
+		DEBUG(errs() << "\t" << fi->getName() << "\n");
 		// Skip library functions
 		if (isLibraryFunction(fi))
 		    continue;
@@ -228,21 +210,15 @@ namespace {
 		l2g_pointer_management_instrumentation(mod, cgn);
 	    }
 
-#ifdef DEBUG
-	    errs() << "}";
-#endif
+	    DEBUG(errs() << "}");
 
-#ifdef DEBUG
-	    errs() << "}\n\n\n";
-#endif
+	    DEBUG(errs() << "}\n\n\n");
 
-#ifdef DEBUG
-	    errs() << "Inserting management functions according to SSDM cuts: {\n";
-#endif
+	    DEBUG(errs() << "Inserting management functions according to SSDM cuts: {\n");
 
-	    // Step 4: Insert stack management functions
-	    // Decide the insertion points of stack management function according to SSDM output
-	    std::unordered_set <CallInst *> stack_management_insert_pts;
+	    // Step 4: Insert stack fame management functions
+	    // Decide the insertion points of stack frame management function according to SSDM output
+	    std::unordered_set <CallInst *> stack_frame_management_insert_pts;
 	    for (auto cuti = cuts.begin(), cute = cuts.end(); cuti != cute; cuti++) {
 		for (size_t vi = 0; vi < cuti->second.size(); vi++) {
 		    unsigned i, j;
@@ -253,33 +229,27 @@ namespace {
 		    assert(paths[i][j]->first && paths[i][j]->second);
 		    CallInst *call_inst = dyn_cast<CallInst> (paths[i][j]->first);
 		    assert(call_inst);
-		    stack_management_insert_pts.insert(call_inst);
+		    stack_frame_management_insert_pts.insert(call_inst);
 		}
 	    }
 	    
-	    // Insert stack management functions accroding to SSDM cuts
-	    for (auto si = stack_management_insert_pts.begin(), se = stack_management_insert_pts.end(); si != se; si++) {
+	    // Insert stack frame management functions accroding to SSDM cuts
+	    for (auto si = stack_frame_management_insert_pts.begin(), se = stack_frame_management_insert_pts.end(); si != se; si++) {
 		CallInst *call_inst = *si;
-		// Insert stack management functions
-		stack_management_instrumentation(mod, call_inst);
+		// Insert stack frame management functions
+		stack_frame_management_instrumentation(mod, call_inst);
 	    }
 
-#ifdef DEBUG
-	    errs() << "}\n";
-#endif
+	    DEBUG(errs() << "}\n");
 
-	    // Step 4: Insert management functions at self-recursive calls
-#ifdef DEBUG
-	    errs() << "Inserting management functions around recursive calls... {\n";
-#endif
+	    // Step 4: Insert frame management functions at self-recursive calls
+	    DEBUG(errs() << "Inserting frame management functions around recursive calls... {\n");
 	    for (std::unordered_set <CallGraphNode *>::iterator si = undecidable_cgns.begin(), se = undecidable_cgns.end(); si != se; si++) {
 		CallGraphNode * cgn = *si;
 		// Skip external nodes
 		if (!cgn->getFunction())
 		    continue;
-#ifdef DEBUG
-		errs() << cgn->getFunction()->getName() << "\n";
-#endif
+		DEBUG(errs() << cgn->getFunction()->getName() << "\n");
 		for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
 		    // Skip non-self-recursive calls
 		    if (cgni->second != cgn)
@@ -287,7 +257,7 @@ namespace {
 		    CallInst *call_inst = dyn_cast<CallInst> (cgni->first);
 		    assert(call_inst);
 
-		    // Check if stack management functions have been inserted
+		    // Check if stack frame management functions have been inserted
 		    BasicBlock::iterator ii(call_inst);
 		    BasicBlock::iterator pos = ii;
 		    long k = 0;
@@ -303,14 +273,12 @@ namespace {
 			if (call_inst && call_inst->getCalledFunction() == func_sstore)
 			    continue;
 		    }
-		    // Insert stack management functions
-		    stack_management_instrumentation(mod, call_inst);
+		    // Insert stack frame management functions
+		    stack_frame_management_instrumentation(mod, call_inst);
 		}
 	    }
 
-#ifdef DEBUG
-	    errs() << "}\n";
-#endif
+	    DEBUG(errs() << "}\n");
 
 	    // Step 4: transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last)
 	    // Create an external function called smm_main
@@ -363,12 +331,11 @@ namespace {
 		    }
 		}
 	    }
-
 	    return true;
 	}
     };
 }
 
-char SmartStackManagementPass::ID = 0; //Id the pass.
-static RegisterPass<SmartStackManagementPass> X("smmssm", "Smart Stack Management Pass"); //Register the pass.
+char StackManagementPass::ID = 0; //Id the pass.
+static RegisterPass<StackManagementPass> X("smmssm", "Smart Stack Management Pass"); //Register the pass.
 

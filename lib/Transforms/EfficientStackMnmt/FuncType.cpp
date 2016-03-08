@@ -23,6 +23,8 @@ bool isStackManagementFunction(Function *func) {
 	return true;
     if (func->getName().count("_l2g") ==1)
 	return true;
+    if (func->getName().count("_ptr_wr") ==1)
+	return true;
     if (func->getName().count("_sstore") ==1)
 	return true;
     if (func->getName().count("_sload") ==1)
@@ -32,4 +34,4 @@ bool isStackManagementFunction(Function *func) {
     }
 
     return false;
-}	
+}

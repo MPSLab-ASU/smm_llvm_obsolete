@@ -1,4 +1,4 @@
-##===- lib/Transforms/Hello/Makefile -----------------------*- Makefile -*-===##
+##===- lib/Transforms/SmartStackManagement/Makefile -----------------------*- Makefile -*-===##
 #
 #                     The LLVM Compiler Infrastructure
 #
@@ -8,7 +8,7 @@
 ##===----------------------------------------------------------------------===##
 
 LEVEL = ../../..
-LIBRARYNAME = LLVMStackManagement
+LIBRARYNAME = LLVMSSM
 LOADABLE_MODULE = 1
 USEDLIBS =
 

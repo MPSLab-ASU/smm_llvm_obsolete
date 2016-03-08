@@ -36,8 +36,8 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "function.h"
-#include "graph.h"
+#include "FuncType.h"
+#include "Graph.h"
 
 
 using namespace llvm;
@@ -308,17 +308,57 @@ namespace {
 
 	virtual bool runOnModule(Module &mod) {
 	    std::ifstream ifs;
+	    std::ofstream ofs;
+	    // Call graph
+	    CallGraph &cg = getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+	    // Get stack frame sizes of user-defined functions
 	    ifs.open("wcg_nodes.txt", std::fstream::in);
 	    if (!ifs.good()) {
 		errs() << "Dumping node weights of WCG to wcg_nodes.txt...\n";
 		ifs.close();
 		getWcgNodeWeights(mod);
 	    }
+	    /*
+	    ifs.open("lib_funcs.txt", std::fstream::in);
+	    if (!ifs.good()) {
+		ifs.close();
+		ofs.open("lib_funcs.txt", std::fstream::out);
+		for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		    CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second);
+		    Function *fi = cgn->getFunction();
+		    // Skip external nodes
+		    if (!fi)
+			continue;
+		    // Skip library functions
+		    if (isLibraryFunction(fi))
+			ofs << fi->getName().str() << "\n";
+		}
+		ofs.close();
+	    }
+	    */
 	    else {
+
 		errs() << "Dumping annotated paths of WCG to wcg_paths.txt...\n";
 		ifs.close();
 		extractAnnotatedWcgPaths(mod);
 	    }
+
+
+	    // Print out the names of library functionsa
+	    ofs.open("lib_funcs.txt", std::fstream::out);
+	    for (CallGraph::iterator cgi = cg.begin(), cge = cg.end(); cgi != cge; cgi++) {
+		CallGraphNode *cgn = dyn_cast<CallGraphNode>(cgi->second);
+		Function *fi = cgn->getFunction();
+		// Skip external nodes
+		if (!fi)
+		    continue;
+		// Skip library functions
+		if (isLibraryFunction(fi))
+		    ofs << fi->getName().str() << "\n";
+	    }
+	    ofs.close();
+
 	    return true;
 	}
     };

@@ -11,115 +11,107 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <unordered_set>
 
-#include "function.h"
+#include "FuncType.h"
+#include "Size.h"
 
-#define DEBUG
+#define DEBUG_TYPE "smmesm"
 
 using namespace llvm;
 
-void g2l_pointer_management_instrumentation(Module &mod, CallGraphNode *cgn) {
+void g2l_instrumentation(Module &mod, Function *func, std::unordered_set<unsigned> &arg_indices) {
     LLVMContext &context = mod.getContext();
     Function *func_g2l = mod.getFunction("_g2l");
-    //Function *func_main = mod.getFunction("main");
+    Function *func_ptr_wr = mod.getFunction("_ptr_wr");
+    assert(func_ptr_wr);
 
-    Function *func = cgn->getFunction();
+    DEBUG(errs() << "\t" << func->getName() << " : " << arg_indices.size() << "\n");
 
-#ifdef DEBUG
-    errs() << "\t" << func->getName() << "\n";
-#endif
-
-
-    for (Function::arg_iterator ai = func->arg_begin(), ae = func->arg_end(); ai != ae; ai++) {
+    unsigned arg_index = 0;
+    for (Function::arg_iterator ai = func->arg_begin(), ae = func->arg_end(); ai != ae; ai++, arg_index++) {
+	if ( arg_indices.find(arg_index) == arg_indices.end() )
+	    continue;
+	assert(ai->getType()->isPointerTy());
 	// Find user instructions of pointer arguments and replace the uses with the result of calling g2l on the arguments
-	if (ai->getType()->isPointerTy()) { 
-	    Value *val = &*ai;
-#ifdef DEBUG
-	    errs() << "\t\t" << *val << " " << val->getNumUses() << "\n";
-#endif
-	    // Find the uses of original value and call g2l on them
-	    for (Value::use_iterator ui = val->use_begin(), ue = val->use_end(); ui != ue; ) {
-		// Move iterator to next use before the current use is destroyed
-		Use *u = &*ui++;
-		unsigned operand_num = u->getOperandNo();
-		Instruction *user_inst = dyn_cast<Instruction>(u->getUser());
-		assert(user_inst);
-#ifdef DEBUG
-		errs() << "\t\t\t" << *user_inst << "\n";
-#endif
+	Value *val = &*ai;
+	Instruction *last_store = NULL;
 
-		Instruction *insert_point = user_inst;
-		// If the use is in a phi instruction, insert g2l function before the terminator of the incoming basic block
-		if (PHINode *target = dyn_cast<PHINode>(user_inst))
-		    insert_point = target->getIncomingBlock(operand_num)->getTerminator();
-		IRBuilder<> builder(insert_point); // Instruction will be inserted before this instruction
-		// Cast the value (in this case, a memory address) to be of char pointer type required by g2l function
-		Value *g2l_arg = builder.CreatePointerCast(val, Type::getInt8PtrTy(context), "g2l_arg");
-		// Call the function g2l with the value with cast type
-		Value *g2l_ret = builder.CreateCall(func_g2l, g2l_arg, "g2l_ret");
-		// Cast the result back to be of the original type
-		Value *g2l_result = builder.CreatePointerCast(g2l_ret, val->getType(), "g2l_result");
-		// Replace the uses of the pointer argument
-		u->set(g2l_result);
-	    }
-	}
-    }
-}
+	DEBUG(errs() << "\t\t" << *val << " " << val->getNumUses() << "\n");
 
+	// Call g2l right after the declaration of the stack variable
+	IRBuilder<> builder(func->getEntryBlock().getFirstInsertionPt()); // Instruction will be inserted before ii
+	// Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
+	Value *g2l_arg = builder.CreatePointerCast(val, Type::getInt8PtrTy(context), "g2l_arg");
+	// Call the function g2l with the value with cast type
+	std::vector<Value *>g2l_args;
+	// Pass the memory address of the variable may reside
+	g2l_args.push_back(g2l_arg);
+	// Pass the size of the variable to transfer if the variable is not in the SPM. TODO Need to consider array variables
+	g2l_args.push_back(builder.getInt64(getSizeOf(val->getType()->getPointerElementType())));
+	// Call the function g2l with the value with cast type
+	//Value *g2l_ret = builder.CreateCall(func_g2l, g2l_arg, "g2l_ret");
+	Value *g2l_ret = builder.CreateCall(func_g2l, g2l_args, "g2l_ret");
 
-void l2g_pointer_management_instrumentation(Module &mod, CallGraphNode *cgn) {
-    LLVMContext &context = mod.getContext();
-    Function *func_l2g = mod.getFunction("_l2g");
-
-#ifdef DEBUG
-    errs() << "\t" << cgn->getFunction()->getName() << "\n";
-#endif
-
-
-    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
-	if (CallInst *call_inst = dyn_cast<CallInst>(cgni->first)) {
-	    // Skip inline assembly
-	    if (call_inst->isInlineAsm())
+	// Cast the result back to be of the original type
+	Value *g2l_result = builder.CreatePointerCast(g2l_ret, val->getType(), "g2l_result");
+	// Find the uses of original value and call g2l on them
+	for (Value::use_iterator ui = val->use_begin(), ue = val->use_end(); ui != ue; ) {
+	    // Move iterator to next use before the current use is destroyed
+	    Use *u = &*ui++;
+	    User *user = u->getUser();
+	    Instruction *user_inst = dyn_cast<Instruction>(user);
+	    assert(user_inst);
+	    // Skip uses introduced by insertion of l2g functions
+	    if (u->getUser()->getName().count("l2g") == 1)
 		continue;
-	    Function *callee = call_inst->getCalledFunction();
-	    // If the called function is a function pointer or if it is not a stack management or an intrinsic function, go ahead and process
-	    if (callee) { 
-		if (isStackManagementFunction(callee))
-		    continue;
-		assert(!callee->isIntrinsic());
-		if (callee->isIntrinsic())
-		    continue;
-	    } 
-#ifdef DEBUG
-	    errs() << "\t\t" << *call_inst << "\n";
-#endif
-	    //  Insert l2g function before function calls wth pointer-type arguments
-	    for (unsigned int i = 0, n = call_inst->getNumArgOperands(); i < n; i++) { 
-		Value *operand = call_inst->getArgOperand(i);
-		if (operand->getType()->isPointerTy() ) {
-#ifdef DEBUG
-		    errs() << "\t\t\t" << *operand << "\n";
-#endif
-		    IRBuilder<> builder(call_inst); // Instruction will be inserted before ii
-		    // Cast the value (in this case, a memory address) to be of char pointer type required by l2g function
-		    Value *l2g_arg = builder.CreatePointerCast(operand, Type::getInt8PtrTy(context), "l2g_arg"); 
-		    // Call the function l2g with the value with cast type
-		    Value *l2g_ret = builder.CreateCall(func_l2g, l2g_arg, "l2g_ret"); 
-		    // Cast the result back to be of the original type
-		    Value *l2g_result = builder.CreatePointerCast(l2g_ret, operand->getType(), "l2g_result"); 
-		    // Replace the use of the original memory address with the translated address
-		    call_inst->setOperand(i, l2g_result); 
+	    // Skip uses introduced by insertion of g2l functions
+	    if (u->getUser()->getName().count("g2l") == 1)
+		continue;
+	    // Skip uses in function call
+	    if (user_inst->getOpcode() == Instruction::Call)
+		continue;
+
+	    DEBUG(errs() << "\t\t\t" << *user_inst << "\n");
+	    if (user_inst->getOpcode() == Instruction::GetElementPtr) {
+		for (Value::use_iterator ui = user_inst->use_begin(), ue = user_inst->use_end(); ui != ue; ui++) {
+		    DEBUG(errs() << "\t\t\t\t" << *ui->getUser() << "\n");
 		}
 	    }
+
+	    // Replace the uses of the pointer argument
+	    u->set(g2l_result);
+	    if (user_inst->getOpcode() == Instruction::Store) { 
+		last_store = user_inst;
+	    } else if (user_inst->getOpcode() == Instruction::GetElementPtr) {
+		for (Value::use_iterator uui = user_inst->use_begin(), uue = user_inst->use_end(); uui != uue; uui++) {
+		    if (StoreInst *st_inst = dyn_cast<StoreInst>(uui->getUser())) {
+			last_store = st_inst;
+		    }
+		}
+	    }
+
+	}
+	if (last_store) {
+	    BasicBlock::iterator ii(last_store);
+	    BasicBlock::iterator in = ii;
+	    in++;
+	    IRBuilder<>builder(&*in);
+	    Value* arg1 = builder.CreatePointerCast(val, Type::getInt8PtrTy(context), "ptr_wr_arg");
+	    Value* arg2 = builder.getInt64(getSizeOf(val->getType()->getPointerElementType()));
+	    std::vector<Value *> wr_args;
+	    wr_args.push_back(arg1);
+	    wr_args.push_back(arg2);
+	    builder.CreateCall(func_ptr_wr, wr_args);
+
 	}
     }
-
 }
 
-
-void stack_management_instrumentation (Module &mod, CallInst *call_inst) {
+void stack_frame_management_instrumentation (Module &mod, CallInst *call_inst) {
     LLVMContext &context = mod.getContext();
 
     // Pointer Types
@@ -149,6 +141,8 @@ void stack_management_instrumentation (Module &mod, CallInst *call_inst) {
 
     BasicBlock::iterator ii(call_inst);
     Instruction *next_inst = &*(++ii);
+
+    DEBUG(errs() << "\t" << *call_inst <<  " " << call_inst->getNumUses() << "\n");
 
     // Before the function call
     // Insert a sstore function
@@ -198,22 +192,17 @@ void stack_management_instrumentation (Module &mod, CallInst *call_inst) {
     StoreInst *st_ret = new StoreInst(call_inst, gvar);
     st_ret->insertAfter(call_inst);
 
-#ifdef DEBUG
-    errs() << "\t" << *call_inst <<  " " << call_inst->getNumUses() << "\n";
-#endif
     for (Value::use_iterator ui_ret = call_inst->use_begin(), ue_ret = call_inst->use_end(); ui_ret != ue_ret;) {
 	// Move iterator to next use before the current use is destroyed
 	Use *u = &*ui_ret++;
 	Instruction *user_inst = dyn_cast<Instruction>(u->getUser()); 
 	assert(user_inst);
-#ifdef DEBUG
-	errs() <<  "\t\t" << *user_inst << "\n";
-#endif
+
+	DEBUG(errs() <<  "\t\t" << *user_inst << "\n");
+
 	if (StoreInst *st_inst = dyn_cast <StoreInst> (user_inst)) {
 	    if (st_inst->getPointerOperand()->getName().count("_gvar") == 1) {
-#ifdef DEBUG
-		errs() << "\t\t\t" << st_inst->getPointerOperand()->getName() << "\n";
-#endif
+		DEBUG(errs() << "\t\t\t" << st_inst->getPointerOperand()->getName() << "\n");
 		continue;
 	    }
 	}

@@ -8,7 +8,7 @@
 ##===----------------------------------------------------------------------===##
 
 LEVEL = ../../..
-LIBRARYNAME = LLVMSmartStackManagement
+LIBRARYNAME = LLVMESM
 LOADABLE_MODULE = 1
 USEDLIBS =
 
@@ -16,7 +16,7 @@ USEDLIBS =
 # from the hello plugin.
 ifneq ($(REQUIRES_RTTI), 1)
 ifneq ($(REQUIRES_EH), 1)
-EXPORTED_SYMBOL_FILE = $(PROJ_SRC_DIR)/SmartStackManagement.exports
+EXPORTED_SYMBOL_FILE = $(PROJ_SRC_DIR)/StackManagement.exports
 endif
 endif
 
