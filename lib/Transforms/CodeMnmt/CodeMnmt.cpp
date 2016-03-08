@@ -61,9 +61,8 @@ namespace {
 	    AU.addRequired<LoopInfo>();
 	}
 
-	// Build the wrapper function: retTy c_call(char *callerName, char *calleeName, calleeTy calleeAddr, ...)
-	Function *build_c_call(CallInst *call_inst)
-	{
+	// Build the wrapper function: retTy c_call_complete(char *callerName, char *calleeName, calleeTy calleeAddr, ...)
+	Function *getOrInsertCCall(CallInst *call_inst) {
 	    // Get the caller
 	    Function* caller = call_inst->getParent()->getParent();
 	    // Get the called function
@@ -93,10 +92,10 @@ namespace {
 	    assert(func_c_get);
 
 	    Function* func_c_call =  nullptr;
-	    
+
 	    // Go through all the exsiting wrapper functions and check if there is any one can be used directly
 	    for (Module::iterator fi = mod->begin(), fe = mod->end(); fi != fe; ++fi) {
-		if (fi->getName().count("c_call") == 1) {
+		if (fi->getName().count("c_call_complete") == 1) {
 		    //int num_args_before = 2;
 		    int num_args_before = 3;
 		    FunctionType *fiTy = fi->getFunctionType();
@@ -149,20 +148,17 @@ namespace {
 		func_c_call = Function::Create(
 			funcTy,
 			GlobalValue::LinkOnceODRLinkage ,
-			"c_call", mod);
-		
-		//DEBUG(errs() << *ptrTy_int8 << "\n");
-		//DEBUG(errs() << *calleeTyPtr << "\n");
+			"c_call_complete", mod);
 	    }
 
 	    assert(func_c_call);
 
 	    // Get arguments for c_call
 	    Function::arg_iterator ai = func_c_call->arg_begin();
-	    // Get caller address from first argument
+	    // Get caller name from first argument
 	    Value* caller_name = ai++;
 	    caller_name->setName("callername");
-	    // Get callee address from second argument
+	    // Get callee name from second argument
 	    Value* callee_name = ai++;
 	    callee_name->setName("calleename");
 	    // Skip callee type from the third argument 
@@ -178,8 +174,9 @@ namespace {
 		callee_arg.push_back(arg);
 	    }
 
-	    // Block entry (c_call_entry)
+	    // Create the entry basic block 
 	    BasicBlock* c_call_entry = BasicBlock::Create(context, "entry",func_c_call, 0);
+	    // Set insert point as the end of entry block
 	    builder.SetInsertPoint(c_call_entry);
 
 	    // Create local variables for callee arugments if passed in
@@ -194,15 +191,16 @@ namespace {
 	    if (!retTy->isVoidTy()) {
 		ret_val = builder.CreateAlloca(retTy, nullptr, "ret_val");
 	    }
-	    
+
 	    // Copy the callee arguments to the local variables if passed in
 	    for (std::vector<Value*>::size_type i = 0; i < callee_arg.size(); i++) {
 		builder.CreateStore(callee_arg[i], callee_arg_addr[i], false);
 	    }
 
 	    // Find out the SPM address for callee
-	   CallInst* callee_vma_int8 = CallInst::Create(func_c_get, callee_name, "callee_vma_int8", c_call_entry);
-	   // Cast the type of the SPM address to the function type of the callee
+	    CallInst* callee_vma_int8 = CallInst::Create(func_c_get, callee_name, "callee_vma_int8", c_call_entry);
+	    //CallInst* callee_vma_int8 = builder.CreateCall(func_c_get, callee_name, "callee_vma_int8");
+	    // Cast the type of the SPM address to the function type of the callee
 	    CastInst* callee_vma = cast <CastInst> (builder.CreateBitCast(callee_vma_int8, calleeTyPtr, "callee_vma")); 
 
 	    // Read callee arguments and get their values if passed in
@@ -219,22 +217,21 @@ namespace {
 	    if (!retTy->isVoidTy()) {
 		callee_ret = builder.CreateCall(callee_vma, callee_arg_vals, "callee_ret_val");
 		builder.CreateStore(callee_ret, ret_val, false);
-	    }
-	    else
+	    } else
 		callee_ret = builder.CreateCall(callee_vma, callee_arg_vals);
-
 
 	    // Ensure the caller is present after the callee returns
 	    CallInst::Create(func_c_get, caller_name, "caller_vma", c_call_entry);
-
+	    //builder.CreateCall(func_c_get, caller_name, "caller_vma");
 
 	    // Read return value and return it if its type is not void
-	    LoadInst *int32_632;
 	    if (!retTy->isVoidTy()) {
-		int32_632 = builder.CreateLoad(ret_val);
-		ReturnInst::Create(context, int32_632, c_call_entry);
+		LoadInst *ld_ret_val = builder.CreateLoad(ret_val);
+		ReturnInst::Create(context, ld_ret_val, c_call_entry);
+		//builder.CreateRet(ld_ret_val);
 	    } else {
 		ReturnInst::Create(context, c_call_entry);
+		//builder.CreateRetVoid();
 	    }
 	    return func_c_call;
 	}
@@ -305,9 +302,7 @@ namespace {
 	    ConstantInt * const_num_mappings = NULL;
 	    std::ifstream ifs;
 	    //std::ofstream ofs;
-	    std::vector<CallGraphNode::CallRecord *> exec_trace;
-	    std::unordered_map <BasicBlock *, std::deque<CallGraphNode::CallRecord *> > calls_in_loops;
-
+	    std::unordered_set<Function *> referredFuncs;
 
 	    /* Read in mappings that relate functions to regions: begin */
 	    ifs.open("_mapping", std::fstream::in);
@@ -325,10 +320,11 @@ namespace {
 		if (func_name != "") {
 		    Function *func;
 		    //DEBUG(errs() << "\t" << func_name << " " << region_id << "\n");
-		    if (func_name == "main")
-			func_name = "smm_main";
+		    //if (func_name == "main")
+			//func_name = "smm_main";
 		    func = mod.getFunction(func_name);
 		    func2reg[func] = builder.getInt32(region_id);
+		    referredFuncs.insert(func);
 		}
 	    }
 
@@ -350,6 +346,10 @@ namespace {
 			continue;
 		    // Skip library functions
 		    if (isLibraryFunction(fi))
+			continue;
+
+		    // Skip functions without references
+		    if (referredFuncs.find(fi) == referredFuncs.end())
 			continue;
 
 		    std::string func_name = fi->getName().str();
@@ -374,8 +374,8 @@ namespace {
 				0, // Initializer
 				"__load_stop_" + func_name);
 			func_load_addr[fi] = std::make_pair(gvar_load_start, gvar_load_stop);
-		    } else
-			func_name = "smm_main";
+		    } //else
+			//func_name = "smm_main";
 		}
 	    }
 
@@ -394,9 +394,10 @@ namespace {
 		    if (isCodeManagementFunction(fi))
 			continue;
 
-		    // Debug only
-		    //if (fi == func_main)
-		    //continue;
+		    // Skip functions without references
+		    if (referredFuncs.find(fi) == referredFuncs.end())
+			continue;
+
 
 
 		    // User-defined caller functions
@@ -404,30 +405,8 @@ namespace {
 		    DEBUG(errs() << func_name <<"\n");
 
 
-		    /*
-		    // Create a seperate section and record the memory address range of the memory space it is loaded to, except the main function
-		    if (func_name != "main") {
-			if (fi->getSection() != "."+func_name)
-			    fi->setSection("."+func_name);
-			//DEBUG(errs() << fi->getSection() << "\n");
-
-			GlobalVariable* gvar_load_start = new GlobalVariable(mod, 
-				IntegerType::get(context, 8),
-				true, //isConstant
-				GlobalValue::ExternalLinkage,
-				0, // Initializer
-				"__load_start_" + func_name);
-
-			GlobalVariable* gvar_load_stop = new GlobalVariable(mod, 
-				IntegerType::get(context, 8), //Type
-				true, //isConstant
-				GlobalValue::ExternalLinkage, // Linkage
-				0, // Initializer
-				"__load_stop_" + func_name);
-			func_load_addr[fi] = std::make_pair(gvar_load_start, gvar_load_stop);
-		    } else
-			func_name = "smm_main";
-			*/
+		    //if (func_name == "main")
+			//func_name = "smm_main";
 
 
 		    for (CallGraphNode::iterator cgni = cgn->begin(), cgne = cgn->end(); cgni != cgne; cgni++) {
@@ -440,7 +419,7 @@ namespace {
 			builder.SetInsertPoint(call_inst);
 			// Skip inline assembly
 			//if (call_inst->isInlineAsm())
-			    //continue;
+			//continue;
 			// Skip calls to function pointers
 
 			// Skip external nodes (inline asm and function pointers)
@@ -457,7 +436,8 @@ namespace {
 			if (!isLibraryFunction(callee)) { 
 			    DEBUG(errs() << "\tcalls " << callee->getName() <<" (U)\n");
 			    // Create a wrapper function for callee
-			    Function *func_c_call = build_c_call(call_inst);
+			    //Function *func_c_call = build_c_call(call_inst);
+			    Function *func_c_call = getOrInsertCCall(call_inst);
 			    // Pass arguments to the pointer to the wraper function
 			    std::vector<Value*> call_args;
 
@@ -618,7 +598,8 @@ namespace {
 		    GlobalValue::ExternalLinkage, // Linkage
 		    0, // Initializer
 		    "__load_stop_main");
-	    func_load_addr[func_smm_main] = std::make_pair(gvar_load_start_main, gvar_load_stop_main);  
+	    //func_load_addr[func_smm_main] = std::make_pair(gvar_load_start_main, gvar_load_stop_main);  
+	    func_load_addr[func_main] = std::make_pair(gvar_load_start_main, gvar_load_stop_main);  
 
 	    const_num_regions = builder.getInt32(num_regions);
 	    const_num_mappings = builder.getInt32(func_load_addr.size());
@@ -638,7 +619,10 @@ namespace {
 		std::string func_name = func->getName();
 		call_args.push_back(builder.CreateGlobalString(func_name));
 		call_args.push_back(ii->second.first);
-		call_args.push_back(func);
+		if (func == func_main)
+		    call_args.push_back(func_smm_main);
+		else
+		    call_args.push_back(func);
 		call_args.push_back(builder.CreateSub(builder.CreatePtrToInt(ii->second.second, builder.getInt64Ty()), builder.CreatePtrToInt(ii->second.first, builder.getInt64Ty())));
 		call_args.push_back(builder.CreateGEP(region_table, func2reg[func]));
 	    }
@@ -661,6 +645,7 @@ namespace {
 	    // Return 
 	    Value *ret_val = builder.getInt32(0);
 	    builder.CreateRet(ret_val);
+	    DEBUG(errs() << "test\n");
 	    /* Transform the main function to an user-defined function (this step will destroy call graph, so it must be in the last): begin */
 
 	    return true;
@@ -670,4 +655,4 @@ namespace {
 }
 
 char CodeManagement::ID = 0;
-static RegisterPass<CodeManagement> X("smmcm", "Code management Pass)");
+static RegisterPass<CodeManagement> X("smmcm", "Code Management Pass)");
