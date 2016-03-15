@@ -97,6 +97,11 @@ class GCCFGFunction {
 	// Add the specified basic block
 	void addBasicBlock(GCCFGBasicBlock *gBB);
 
+
+	// Get the number of calls to user functions within this function by 1
+	long getNumberOfCalls();
+	// Increase the number of calls to user functions within this function by 1
+	void increaseNumberOfCalls();
 	// Return the region ID this function is mapped to
 	unsigned long getRegionID();
 
@@ -126,6 +131,10 @@ class GCCFGFunction {
 	// Simulate the execution 
 	RegionStatus simulate(RegionStatus &rs);
 
+	// Check if the fix-point iteration converges
+	bool converge();
+	// Save the current region status to the previous region status
+	void resetForNextIteration();
 	// Reset the region status
 	void resetForNextAnalysis();
 	// Categorize all the call instructions within the loop with the specified header
@@ -133,6 +142,8 @@ class GCCFGFunction {
 	// Print the categories
 	void printCategory();
     private:
+	// The number of calls to user functions within this function
+	long numCalls;
 	// ID of the region this function maps to
 	unsigned long regionID;
 	// Current access number of this function
@@ -149,9 +160,14 @@ class GCCFGFunction {
 	std::vector<RegionStatus *> inputs;
 	std::vector<RegionStatus *> outputs;
 
+	// The input region status in the previous run
+	std::vector<RegionStatus *> previousInputs;
+	// The output region status in the previous run
+	std::vector<RegionStatus *> previousOutputs;
 
-	RegionStatus * throughInput;
-	RegionStatus * throughOutput;
+
+	//RegionStatus * throughInput;
+	//RegionStatus * throughOutput;
 };
 
 // GCCFG basic block
@@ -194,6 +210,12 @@ class GCCFGBasicBlock {
 	RegionStatus simulate(RegionStatus &rs);
 	// Simulate the execution without considering back edges
 	RegionStatus simulateThrough(RegionStatus &rs);
+
+
+	// Check if the fix-point iteration converges
+	bool converge();
+	// Save the current region status to the previous region status
+	void resetForNextIteration();
 	// Reset the region status
 	void resetForNextAnalysis();
 	// Print the categories
@@ -208,6 +230,11 @@ class GCCFGBasicBlock {
 
 	std::vector<RegionStatus *> inputs;
 	std::vector<RegionStatus *> outputs;
+	// The input region status in the previous run
+	std::vector<RegionStatus *> previousInputs;
+	// The output region status in the previous run
+	std::vector<RegionStatus *> previousOutputs;
+
 };
 
 class GCCFGInstruction {

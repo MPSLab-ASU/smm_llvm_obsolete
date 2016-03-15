@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "smmcm-exec"
+#define DEBUG_TYPE "smmcmh-exec"
 
 #include "llvm/Pass.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -48,7 +48,6 @@
 #include <unordered_map>
 
 #include "FuncType.h"
-#include "Graph.h"
 
 
 using namespace llvm;
@@ -62,6 +61,29 @@ namespace {
 	    AU.addRequired<CallGraphWrapperPass>();
 	    AU.addRequired<LoopInfo>();
 	}
+
+	void dfs_visit(CallGraphNode::CallRecord *v, std::vector<CallGraphNode::CallRecord *>& exec_trace) {
+	    exec_trace.push_back(v);
+	    CallGraphNode *caller_cgn = v->second;
+	    for (CallGraphNode::iterator ii = caller_cgn->begin(), ie = caller_cgn->end(); ii != ie; ii++) {
+		CallGraphNode::CallRecord *w = &*ii;
+		CallGraphNode *called_cgn = w->second;
+		Function *called_func = called_cgn->getFunction();
+		// Skip library functions (consider them later?)
+		if ( called_cgn->getFunction() && called_cgn != caller_cgn && !isLibraryFunction(called_func)) {
+		    dfs_visit(w, exec_trace);
+		    exec_trace.push_back(v);
+		}
+	    }
+	}
+
+	std::vector<CallGraphNode::CallRecord *> getExecTrace(CallGraphNode::CallRecord *root) {
+	    std::vector<CallGraphNode::CallRecord *> exec_trace;
+	    dfs_visit(root, exec_trace);
+
+	    return exec_trace;
+	}
+
 
 
 	virtual bool runOnModule (Module &mod) {
@@ -231,4 +253,4 @@ namespace {
 }
 
 char ExecTrace::ID = 0;
-static RegisterPass<ExecTrace> X("smmcm-exec", "Emulation of Execution)");
+static RegisterPass<ExecTrace> X("smmcmh-exec", "Emulation of Execution)");

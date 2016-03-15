@@ -155,6 +155,7 @@ void GCCFG::build() {
 
 			gInst = new GCCFGInstruction(&*ii);
 			gbb->addInstruction(gInst);
+			gf->increaseNumberOfCalls();
 
 		    }
 		    // Add an exit block if this block contains the return instruction
@@ -232,6 +233,7 @@ void GCCFG::runOnce() {
 
 void GCCFG::analyze() {
     std::unordered_map <CallInst *, std::pair<AnalysisResult, AnalysisResult> > result1, result2, result;
+
     // Build GCCFG
     build();
     // Initialize states of functions
@@ -288,9 +290,9 @@ void GCCFG::analyzeFirstMiss() {
     RegionStatus temp(numRegions);
     for (std::vector<GCCFGFunction *>::iterator fi = gFuncs.begin(), fe = gFuncs.end(); fi != fe; ++fi) {
 	GCCFGFunction *gFunc = *fi;
-	errs() << "####################Loop starts######################\n";
+	errs() << "####################Function starts######################\n";
 	gFunc->simulateLoops();
-	errs() << "####################Loop ends  ############\n";
+	errs() << "####################Function ends  ############\n";
     }
 }
 
@@ -303,39 +305,19 @@ bool GCCFG::converge() {
     //errs() << "GCCFG converge\n";
     for (auto ii = gFuncs.begin(), ie = gFuncs.end(); ii != ie; ++ii) {
 	GCCFGFunction *gFunc = *ii;
-	std::vector <GCCFGBasicBlock *> gBBs = gFunc->getBasicBlocks();
-	for (auto ji = gBBs.begin(), je = gBBs.end(); ji != je; ++ji) {
-	    GCCFGBasicBlock *gBB = *ji;
-	    std::vector <GCCFGInstruction *> gInsts = gBB->getInstructions();
-	    for (auto ki = gInsts.begin(), ke = gInsts.end(); ki != ke; ++ki) {
-		GCCFGInstruction *gInst = *ki;
-		if (!gInst->converge()) {
-		    //errs() << "\t" << gFunc->getName() << " : " << *gInst->getLLVMInstruction() << "\n";
-		    return false;
-		}
-	    }
-	}
+	if (!gFunc->converge())
+	    return false;
     }
     return true;
 }
 
 void GCCFG::resetForNextIteration() {
-    //errs() << "GCCFG resetForNextIteration\n";
     for (auto ii = gFuncs.begin(), ie = gFuncs.end(); ii != ie; ++ii) {
 	GCCFGFunction *gFunc = *ii;
-	std::vector <GCCFGBasicBlock *> gBBs = gFunc->getBasicBlocks();
-	for (auto ji = gBBs.begin(), je = gBBs.end(); ji != je; ++ji) {
-	    GCCFGBasicBlock *gBB = *ji;
-	    std::vector <GCCFGInstruction *> gInsts = gBB->getInstructions();
-	    for (auto ki = gInsts.begin(), ke = gInsts.end(); ki != ke; ++ki) {
-		GCCFGInstruction *gInst = *ki;
-		gInst->resetForNextIteration();
-	    }
-	}
-	// Reset the number of times functions are visited. It must be done at the last step
-	gFunc->resetAccessNumber();
+	gFunc->resetForNextIteration();
     }
 }
+
 
 void GCCFG::resetForNextAnalysis() {
     //errs() << "GCCFG reset\n";
@@ -483,9 +465,11 @@ GCCFGFunction::GCCFGFunction(GCCFG *gccfg, Function *f, unsigned long regionID) 
     this->gccfg = gccfg;
     func = f;
     name = f->getName();
+    numCalls = 0;
     this->regionID = regionID;
     accessNum = -1;
     numAccessed = 0;
+
 }
 
 GCCFG* GCCFGFunction::getParent() {
@@ -494,6 +478,14 @@ GCCFG* GCCFGFunction::getParent() {
 
 std::string GCCFGFunction::getName() {
     return name;
+}
+
+long GCCFGFunction::getNumberOfCalls() {
+    return numCalls;
+}
+
+void GCCFGFunction::increaseNumberOfCalls() {
+    ++numCalls;
 }
 
 GCCFGBasicBlock *GCCFGFunction::getEntryBlock() {
@@ -575,6 +567,8 @@ void GCCFGFunction::initialize() {
     for (long i = 0; i < numAccessed; ++i) {
 	inputs.push_back(new RegionStatus(numRegions));
 	outputs.push_back(new RegionStatus(numRegions));
+	previousInputs.push_back(new RegionStatus(numRegions));
+	previousOutputs.push_back(new RegionStatus(numRegions));
     }
 
     for (std::vector <GCCFGBasicBlock *>::iterator ii = gBBs.begin(), ie = gBBs.end(); ii != ie; ++ii) {
@@ -621,6 +615,7 @@ void GCCFGFunction::simulateLoops() {
 
     for (std::unordered_set<BasicBlock *>::iterator li = lpHeaders.begin(), le = lpHeaders.end(); li != le; ++li) {
 	BasicBlock *lpHeader = *li;
+	errs() << "####################Loop starts#######################\n";
 	errs() << "###########################################\n";
 	simulate(lpHeader);
 	errs() << "###########################################\n";
@@ -635,6 +630,7 @@ void GCCFGFunction::simulateLoops() {
 	// Categorize the call instructions
 	categorize(lpHeader);
 
+	errs() << "####################Loop ends#######################\n";
 	// Reset the graph for the next analysis
 	gccfg->resetForNextAnalysis();
     }
@@ -720,7 +716,7 @@ void GCCFGFunction::simulate(BasicBlock *lpHeader) {
 		    BasicBlock *pred_bb = pred->getLLVMBasicBlock();
 		    DominatorTree &dt = gccfg->p->getAnalysis<DominatorTreeWrapperPass>(*func).getDomTree();
 		    //Instruction * pred_first_inst = pred_bb->getFirstNonPHI();
-		    //std::cerr << std::hex << pred_bb->getName().str() << " " << pred_first_inst << ( dt.dominates(pred_first_inst, firstInst)  ? " dominates " : " does not dominate ") << bb->getName().str() << " "  << firstInst << "\n";
+		    std::cerr << std::hex << bb->getName().str() << " " << ( dt.dominates(firstInst, pred_bb)  ? " dominates " : " does not dominate ") << pred_bb->getName().str() << " "  << "\n";
 		    // Ignore back edges 
 		    if (!dt.dominates(firstInst, pred_bb) && (pred_bb != bb)) {
 			RegionStatus temp2 = pred->getOutput();
@@ -733,6 +729,15 @@ void GCCFGFunction::simulate(BasicBlock *lpHeader) {
 		    }
 		}
 		regStat = temp1;
+		if (regStat.empty()) {
+		    //regStat[regionID].clear();
+		    regStat[regionID].insert(func);
+		} else {
+		    if(regStat[regionID].size() != 1)
+			assert (false);
+		    if(*regStat[regionID].begin() != func)
+			assert(false);
+		}
 	    }
 
 	    // Simulate the current basic block
@@ -766,7 +771,7 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 
     input = rs;
 
-    if (name == "main")
+    //if (name == "main")
 	errs() << name << " accessed for the " << accessNum << " time\n";
 
     // If this function does not return, then return the input status (before updating the region this function is mapped to)
@@ -775,18 +780,22 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 	return output;
     }
 
-    // Get the type of analysis being performed
-    //analysisType = getAnalysisType();
     // Set this function as the current function in the region it maps to
     regionID = overlayMap[func];
     //input[regionID] = func;
     input[regionID].clear();
     input[regionID].insert(func);
-    if (name == "main")
-	std::cerr << name << " input: "<< input << "\n";
+    //if (name == "main")
+    std::cerr << name << " input: "<< input << "\n";
+    if (numCalls <= 0) {
+	output = input;
+	//if (name == "main")
+	std::cerr << name << " output: " << output << "\n";
+	return output;
+    }
+
     // Label the entry block as discovered
     discovered.insert(entryBB);
-
     // Simulate the entry block
     entryBB->simulateThrough(input);
     // Push the neighbouring nodes of the entry block to the stack
@@ -800,8 +809,8 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 	s.pop();
 	//errs() << "\t" << func->getName() << " " << v->getLLVMBasicBlock()->getName() << "\n";
 	if (discovered.find(v) == discovered.end()) {
-	    // Label the node as discovered
-	    discovered.insert(v);
+	    // The flag that shows if all its predecessors have been visited (excluding back edges)
+	    bool ready = true;
 
 	    BasicBlock *bb = v->getLLVMBasicBlock();
 	    Instruction *firstInst = bb->getFirstNonPHI();
@@ -811,7 +820,9 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 	    // Set up the input region status of the current basic block
 	    RegionStatus regStat(numRegions);
 	    if (numPredecessors == 1) {
-		RegionStatus temp = v->getPredecessor(0)->getOutput();
+		GCCFGBasicBlock *pred = v->getPredecessor(0);
+		assert(discovered.find(pred) != discovered.end());
+		RegionStatus temp = pred->getOutput();
 		regStat = temp;
 	    } else {
 		RegionStatus temp1(numRegions);
@@ -820,19 +831,19 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 		for (unsigned long i = 0; i < v->getNumPredecessors(); ++i) {
 		    GCCFGBasicBlock *pred = v->getPredecessor(i);
 		    BasicBlock *pred_bb = pred->getLLVMBasicBlock();
+
+
 		    // Ignore back edges 
 		    DominatorTree &dt = gccfg->p->getAnalysis<DominatorTreeWrapperPass>(*func).getDomTree();
-		    //std::cerr << std::hex << bb->getName().str() << " " << ( dt.dominates(firstInst, pred_bb)  ? " dominates " : " does not dominate ") << pred_bb->getName().str() << "\n";
-
-		    /*
-		    if (getAnalysisType() == MustAnalysis)
-			if ( (discovered.find(pred) == discovered.end()) && (pred == v)) 
-			    continue;
-
-		    if (getAnalysisType() == PersistenceAnalysis)
-		    */
 		    if (dt.dominates(firstInst, pred_bb) || (pred_bb == bb)) 
 			continue;
+
+		    // Check if any forward predecessors have not been visited
+		    if (discovered.find(pred) == discovered.end()) {
+			ready = false;
+			break;;
+		    }
+
 
 		    RegionStatus temp2 = pred->getOutput();
 		    if (unitialized) {
@@ -842,17 +853,17 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
 		    }
 		    temp1 = temp1 && temp2;
 		}
+
+
+		// Do not handle this basic block until all its forward predecessors have been visited
+		if (!ready)
+		    continue;
 		regStat = temp1;
-		if (regStat.empty()) {
-		//regStat[regionID].clear();
-		regStat[regionID].insert(func);
-		} else {
-		    if(regStat[regionID].size() != 1)
-			assert (false);
-		    if(*regStat[regionID].begin() != func)
-			assert(false);
-		}
+		assert(!regStat.empty());
 	    }
+	    // Label the node as discovered
+	    discovered.insert(v);
+
 	    // Simulate the current basic block
 	    v->simulateThrough(regStat);
 	    //errs() << "\t" << func->getName() << " " << v->getLLVMBasicBlock()->getName() << " " << v->getNumSuccessors() << "\n";
@@ -873,7 +884,7 @@ RegionStatus GCCFGFunction::simulateThrough(RegionStatus &rs) {
     }
     output = regStat;
 
-    if (name == "main")
+    //if (name == "main")
 	std::cerr << name << " output: " << output << "\n";
 
     return output;
@@ -897,7 +908,7 @@ RegionStatus GCCFGFunction::simulate(RegionStatus &rs) {
 
     input = rs;
 
-    if (name == "main")
+    //if (name == "main")
 	errs() << name << " accessed for the " << accessNum << " time\n";
 
     // If this function does not return, then return the input status (before updating the region this function is mapped to)
@@ -906,20 +917,27 @@ RegionStatus GCCFGFunction::simulate(RegionStatus &rs) {
 	return output;
     }
 
-    // Get the type of analysis being performed
-    //analysisType = getAnalysisType();
     // Set this function as the current function in the region it maps to
     regionID = overlayMap[func];
     //input[regionID] = func;
     input[regionID].clear();
     input[regionID].insert(func);
-    if (name == "main")
-	std::cerr << name << " input: "<< input << "\n";
+    //if (name == "main")
+    std::cerr << name << " input: " << input << "\n";
+
+    // Return if this function does not call any user functions
+    if (numCalls <= 0) {
+	output = input;
+	//if (name == "main")
+	std::cerr << name << " output: " << output << "\n";
+	return output;
+    }
+
     // Label the entry block as discovered
     discovered.insert(entryBB);
 
     // Simulate the entry block
-    entryBB->simulate(input);
+    entryBB->simulateThrough(input);
     // Push the neighbouring nodes of the entry block to the stack
     for (unsigned long i = 0; i < entryBB->getNumSuccessors(); ++i) {
 	s.push(entryBB->getSuccessor(i));
@@ -931,36 +949,60 @@ RegionStatus GCCFGFunction::simulate(RegionStatus &rs) {
 	s.pop();
 	//errs() << "\t" << func->getName() << " " << v->getLLVMBasicBlock()->getName() << "\n";
 	if (discovered.find(v) == discovered.end()) {
-	    // Label the node as discovered
-	    discovered.insert(v);
+	    // The flag that shows if all its predecessors have been visited (excluding back edges)
+	    bool ready = true;
+
+	    BasicBlock *bb = v->getLLVMBasicBlock();
+	    Instruction *firstInst = bb->getFirstNonPHI();
+
 	    numPredecessors = v->getNumPredecessors();
 	    assert(numPredecessors >= 1);
 	    // Set up the input region status of the current basic block
 	    RegionStatus regStat(numRegions);
 	    if (numPredecessors == 1) {
-		RegionStatus temp = v->getPredecessor(0)->getOutput();
+		GCCFGBasicBlock *pred = v->getPredecessor(0);
+		assert(discovered.find(pred) != discovered.end());
+		RegionStatus temp = pred->getOutput();
 		regStat = temp;
 	    } else {
-		RegionStatus temp1 = v->getPredecessor(0)->getOutput();
+		RegionStatus temp1(numRegions);
 		// Join the output region status of all the predecessors if there are more than one predecessor
-		for (unsigned long i = 1; i < v->getNumPredecessors(); ++i) {
+		bool unitialized = true;
+		for (unsigned long i = 0; i < v->getNumPredecessors(); ++i) {
 		    GCCFGBasicBlock *pred = v->getPredecessor(i);
+		    BasicBlock *pred_bb = pred->getLLVMBasicBlock();
+		    // Check if any forward predecessors have not been visited
+		    if (discovered.find(pred) == discovered.end()) {
+			DominatorTree &dt = gccfg->p->getAnalysis<DominatorTreeWrapperPass>(*func).getDomTree();
+			// Ignore back edges 
+			if (!dt.dominates(firstInst, pred_bb) && !(pred_bb == bb)) {
+			    ready = false;
+			    break;
+			}
+		    }
+
+
 		    RegionStatus temp2 = pred->getOutput();
+		    if (unitialized) {
+			temp1 = temp2;
+			unitialized = false;
+			continue;
+		    }
 		    temp1 = temp1 && temp2;
 		}
+
+
+		// Do not handle this basic block until all its forward predecessors have been visited
+		if (!ready)
+		    continue;
 		regStat = temp1;
-		if (regStat.empty()) {
-		//regStat[regionID].clear();
-		regStat[regionID].insert(func);
-		} else {
-		    if(regStat[regionID].size() != 1)
-			assert (false);
-		    if(*regStat[regionID].begin() != func)
-			assert(false);
-		}
+		assert(!regStat.empty());
 	    }
+	    // Label the node as discovered
+	    discovered.insert(v);
+
 	    // Simulate the current basic block
-	    v->simulate(regStat);
+	    v->simulateThrough(regStat);
 	    //errs() << "\t" << func->getName() << " " << v->getLLVMBasicBlock()->getName() << " " << v->getNumSuccessors() << "\n";
 	    // Push all the neighbors of v to the stack
 	    for (unsigned long i = 0; i < v->getNumSuccessors(); ++i) {
@@ -978,18 +1020,57 @@ RegionStatus GCCFGFunction::simulate(RegionStatus &rs) {
 	regStat = regStat && temp;
     }
     output = regStat;
-    if (name == "main")
+
+    //if (name == "main")
 	std::cerr << name << " output: " << output << "\n";
 
     return output;
 }
 
+bool GCCFGFunction::converge() {
+    long size = getAccessNumber()+1;
+    for (long i = 0; i < size; ++i) {
+	if (*previousInputs[i] != *inputs[i]) {
+	    return false;
+	}
+	if (*previousOutputs[i] != *outputs[i]) {
+	    return false;
+	}
+    }
 
+    for (auto ji = gBBs.begin(), je = gBBs.end(); ji != je; ++ji) {
+	GCCFGBasicBlock *gBB = *ji;
+	    if (!gBB->converge()) {
+		//errs() << "\t" << gFunc->getName() << " : " << *gInst->getLLVMInstruction() << "\n";
+		return false;
+	}
+    }
+    return true;
+}
+
+void GCCFGFunction::resetForNextIteration() {
+    long size = getAccessNumber()+1;
+    for (long i = 0; i < size; ++i) {
+	*previousInputs[i] = *inputs[i];
+	*previousOutputs[i] = *outputs[i];
+    }
+
+    for (auto ji = gBBs.begin(), je = gBBs.end(); ji != je; ++ji) {
+	GCCFGBasicBlock *gBB = *ji;
+	gBB->resetForNextIteration();
+    }
+
+    // Reset the number of times functions are visited. It must be done at the last step
+   resetAccessNumber();
+}
 
 void GCCFGFunction::resetForNextAnalysis() {
-    unsigned long size = inputs.size();
+    //unsigned long size = inputs.size();
+    long size = getAccessNumber()+1;
     // Reset the region status of this function
-    for (unsigned long i = 0; i < size; ++i) {
+    for (long i = 0; i < size; ++i) {
+	previousInputs[i]->reset();
+	previousOutputs[i]->reset();
 	inputs[i]->reset();
 	outputs[i]->reset();
     }
@@ -1108,6 +1189,8 @@ void GCCFGBasicBlock::initialize() {
     for (long i = 0; i < numAccessed; ++i) {
 	inputs.push_back(new RegionStatus(numRegions));
 	outputs.push_back(new RegionStatus(numRegions));
+	previousInputs.push_back(new RegionStatus(numRegions));
+	previousOutputs.push_back(new RegionStatus(numRegions));
     }
 
     for (std::vector <GCCFGInstruction *>::iterator ii = gInsts.begin(), ie = gInsts.end(); ii != ie; ++ii) {
@@ -1146,7 +1229,7 @@ RegionStatus GCCFGBasicBlock::simulate(RegionStatus &rs) {
 
 
     std::string func_name = bb->getParent()->getName();
-    if (bb->getParent()->getName() == "main") {
+    //if (bb->getParent()->getName() == "main") {
 	errs() << "\t" << func_name << "." << name << "\tpredecessors: ";
 	for (unsigned long i = 0; i < preds.size(); ++i) {
 	    RegionStatus temp = preds[i]->getOutput();
@@ -1154,7 +1237,7 @@ RegionStatus GCCFGBasicBlock::simulate(RegionStatus &rs) {
 	}
 	errs() << "\n";
 	std::cerr << "\t\t" << func_name << "." << name << " input [" << input << "]\n";
-    }
+    //}
 
     if (numCallInsts > 0) {
 	gInsts[0]->simulate(input);
@@ -1169,7 +1252,7 @@ RegionStatus GCCFGBasicBlock::simulate(RegionStatus &rs) {
 	output = input;
     }
 
-    if (bb->getParent()->getName() == "main") 
+    //if (bb->getParent()->getName() == "main") 
 	std::cerr << "\t\t" << func_name << "." << name << " output [" << output << "]\n";
     return output;
 }
@@ -1185,7 +1268,7 @@ RegionStatus GCCFGBasicBlock::simulateThrough(RegionStatus &rs) {
 
 
     std::string func_name = bb->getParent()->getName();
-    if (bb->getParent()->getName() == "main") {
+    //if (bb->getParent()->getName() == "main") {
 	errs() << "\t" << func_name << "." << name << "\tpredecessors: ";
 	for (unsigned long i = 0; i < preds.size(); ++i) {
 	    RegionStatus temp = preds[i]->getOutput();
@@ -1193,7 +1276,7 @@ RegionStatus GCCFGBasicBlock::simulateThrough(RegionStatus &rs) {
 	}
 	errs() << "\n";
 	std::cerr << "\t\t" << func_name << "." << name << " input [" << input << "]\n";
-    }
+    //}
 
     if (numCallInsts > 0) {
 	gInsts[0]->simulateThrough(input);
@@ -1208,18 +1291,56 @@ RegionStatus GCCFGBasicBlock::simulateThrough(RegionStatus &rs) {
 	output = input;
     }
 
-    if (bb->getParent()->getName() == "main") 
+    //if (bb->getParent()->getName() == "main") 
 	std::cerr << "\t\t" << func_name << "." << name << " output [" << output << "]\n";
     return output;
 }
 
+bool GCCFGBasicBlock::converge() {
+    long size = getFunctionAccessNumber()+1;
+    for (long i = 0; i < size; ++i) {
+	if (*previousInputs[i] != *inputs[i]) {
+	    return false;
+	}
+	if (*previousOutputs[i] != *outputs[i]) {
+	    return false;
+	}
+    }
+    for (auto ki = gInsts.begin(), ke = gInsts.end(); ki != ke; ++ki) {
+	GCCFGInstruction *gInst = *ki;
+	if (!gInst->converge()) {
+	    //errs() << "\t" << gFunc->getName() << " : " << *gInst->getLLVMInstruction() << "\n";
+	    return false;
+	}
+    }
+    return true;
+}
+
+void GCCFGBasicBlock::resetForNextIteration() {
+    long size = getFunctionAccessNumber()+1;
+    for (long i = 0; i < size; ++i) {
+	*previousInputs[i] = *inputs[i];
+	*previousOutputs[i] = *outputs[i];
+    }
+
+    for (auto ki = gInsts.begin(), ke = gInsts.end(); ki != ke; ++ki) {
+	GCCFGInstruction *gInst = *ki;
+	gInst->resetForNextIteration();
+    }
+}
+
 void GCCFGBasicBlock::resetForNextAnalysis() {
-    unsigned long num = inputs.size();
-    // Reset the region status of this function
-    for (unsigned long i = 0; i < num; ++i) {
+    //unsigned long num = inputs.size();
+    long size = getFunctionAccessNumber()+1;
+    // Reset the region status of this basic block
+    for (long i = 0; i < size; ++i) {
+	previousInputs[i]->reset();
+	previousOutputs[i]->reset();
 	inputs[i]->reset();
 	outputs[i]->reset();
     }
+
+
     // Reset the region status of its instructions
     for (auto ii = gInsts.begin(), ie = gInsts.end(); ii != ie; ++ii) {
 	GCCFGInstruction *gInst = *ii;
@@ -1248,10 +1369,13 @@ Instruction *GCCFGInstruction::getLLVMInstruction() {
 
 void GCCFGInstruction::runOnce() {
     CallInst *callInst = cast <CallInst>(inst);
+    Function *caller = callInst->getParent()->getParent();
     Function *callee = callInst->getCalledFunction();
     GCCFGFunction *gCallee = funcMap[callee];
-    // Simulate the execution of the called function 
-    gCallee->runOnce();
+
+    // Simulate the execution of the called function  if the called function is not self-recursive
+    if (caller != callee) 
+	gCallee->runOnce();
 }
 
 void GCCFGInstruction::initialize() {
@@ -1310,27 +1434,39 @@ RegionStatus GCCFGInstruction::simulate(RegionStatus &rs) {
     CallInst *callInst = cast <CallInst>(inst);
     Function *callee = callInst->getCalledFunction();
     Function *caller = inst->getParent()->getParent();
+    callerRegionID = overlayMap[caller];
     GCCFGFunction *gCallee = funcMap[callee];
 
-    if (inst->getParent()->getParent()->getName() == "main") {
-	errs() << "\t\t\t" << *inst << "\n"; 
-	std::cerr << "\t\t\t\tinput: " << input << "\n";
-    }
-    // Simulate the execution of the called function 
-    RegionStatus temp = gCallee->simulate(input);
-    // Get the output region status after the callee is brought to the SPM and executed
-    intermediate = temp;
-    // Get the output region status after the caller is brought to the SPM
-    callerRegionID = overlayMap[caller];
-    output = intermediate;
-    //output[callerRegionID] = caller; 
-    output[callerRegionID].clear();
-    output[callerRegionID].insert(caller);
+    //if (inst->getParent()->getParent()->getName() == "main") {
+    errs() << "\t\t\t" << *inst << "\n"; 
+    std::cerr << "\t\t\t\tinput: " << input << "\n";
+    //}
 
-    if (inst->getParent()->getParent()->getName() == "main") {
-	std::cerr << "\t\t\t\tintermediate: " << intermediate << "\n";
-	std::cerr << "\t\t\t\toutput: " << output << "\n";
+    // If the function call is self recursive, check if it is the only function call within the caller function
+    if (callee == caller) {
+	//GCCFGFunction *gCaller = funcMap[caller];
+	//assert(gCaller->getNumberOfCalls() == 1);
+	intermediate = input;
+	//intermediate[callerRegionID].clear();
+	//intermediate[callerRegionID].insert(caller);
+	output = intermediate;
+    } else {
+	// Simulate the execution of the called function 
+	RegionStatus temp = gCallee->simulate(input);
+	// Get the output region status after the callee is brought to the SPM and executed
+	intermediate = temp;
+	// Get the output region status after the caller is brought to the SPM
+	//callerRegionID = overlayMap[caller];
+	output = intermediate;
+	//output[callerRegionID] = caller; 
+	output[callerRegionID].clear();
+	output[callerRegionID].insert(caller);
     }
+
+    //if (inst->getParent()->getParent()->getName() == "main") {
+    std::cerr << "\t\t\t\tintermediate: " << intermediate << "\n";
+    std::cerr << "\t\t\t\toutput: " << output << "\n";
+    //}
     return output;
 }
 
@@ -1350,25 +1486,36 @@ RegionStatus GCCFGInstruction::simulateThrough(RegionStatus &rs) {
     Function *caller = inst->getParent()->getParent();
     GCCFGFunction *gCallee = funcMap[callee];
 
-    if (inst->getParent()->getParent()->getName() == "main") {
-	errs() << "\t\t\t" << *inst << "\n"; 
-	std::cerr << "\t\t\t\tinput: " << input << "\n";
-    }
-    // Simulate the execution of the called function 
-    RegionStatus temp = gCallee->simulateThrough(input);
-    // Get the output region status after the callee is brought to the SPM and executed
-    intermediate = temp;
-    // Get the output region status after the caller is brought to the SPM
-    callerRegionID = overlayMap[caller];
-    output = intermediate;
-    //output[callerRegionID] = caller; 
-    output[callerRegionID].clear();
-    output[callerRegionID].insert(caller);
+    //if (inst->getParent()->getParent()->getName() == "main") {
+    errs() << "\t\t\t" << *inst << "\n"; 
+    std::cerr << "\t\t\t\tinput: " << input << "\n";
+    //}
 
-    if (inst->getParent()->getParent()->getName() == "main") {
-	std::cerr << "\t\t\t\tintermediate: " << intermediate << "\n";
-	std::cerr << "\t\t\t\toutput: " << output << "\n";
+    // If the function call is self recursive, check if it is the only function call within the caller function
+    if (callee == caller) {
+	//GCCFGFunction *gCaller = funcMap[caller];
+	//assert(gCaller->getNumberOfCalls() == 1);
+	intermediate = input;
+	//intermediate[callerRegionID].clear();
+	//intermediate[callerRegionID].insert(caller);
+	output = intermediate;
+    } else {
+	// Simulate the execution of the called function 
+	RegionStatus temp = gCallee->simulateThrough(input);
+	// Get the output region status after the callee is brought to the SPM and executed
+	intermediate = temp;
+	// Get the output region status after the caller is brought to the SPM
+	callerRegionID = overlayMap[caller];
+	output = intermediate;
+	//output[callerRegionID] = caller; 
+	output[callerRegionID].clear();
+	output[callerRegionID].insert(caller);
     }
+
+    //if (inst->getParent()->getParent()->getName() == "main") {
+    std::cerr << "\t\t\t\tintermediate: " << intermediate << "\n";
+    std::cerr << "\t\t\t\toutput: " << output << "\n";
+    //}
     return output;
 }
 

@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "smmcm-helper"
+#define DEBUG_TYPE "smmcmh-funcinfo"
 
 #include "llvm/Pass.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -42,9 +42,9 @@
 using namespace llvm;
 
 namespace {
-    struct CodeManagementHelper : public ModulePass { // Insert code management functions
+    struct FuncInfo : public ModulePass { // Insert code management functions
 	static char ID; // Pass identification, replacement for typeid
-	CodeManagementHelper() : ModulePass(ID) {}
+	FuncInfo() : ModulePass(ID) {}
 
 	virtual void getAnalysisUsage(AnalysisUsage &AU) const {
 	    AU.addRequired<CallGraphWrapperPass>();
@@ -80,5 +80,5 @@ namespace {
     };
 }
 
-char CodeManagementHelper::ID = 0;
-static RegisterPass<CodeManagementHelper> X("smmcm-helper", "Code management Helper Pass)");
+char FuncInfo::ID = 0;
+static RegisterPass<FuncInfo> X("smmcmh-funcinfo", "Get function information)");
