@@ -330,6 +330,9 @@ void GCCFG::resetForNextAnalysis() {
 void GCCFG::categorize() {
     for (auto ii = gFuncs.begin(), ie = gFuncs.end(); ii != ie; ++ii) {
 	GCCFGFunction *gFunc = *ii;
+	// Skip dead code
+	if (gFunc->getNumberAccessed() <= 0)
+	    continue;
 	std::vector <GCCFGBasicBlock *> gBBs = gFunc->getBasicBlocks();
 	for (auto ji = gBBs.begin(), je = gBBs.end(); ji != je; ++ji) {
 	    GCCFGBasicBlock *gBB = *ji;
@@ -1086,6 +1089,9 @@ void GCCFGFunction::resetForNextAnalysis() {
 }
 
 void GCCFGFunction::categorize(BasicBlock *lpHeader) {
+    // Skip dead code
+    if (numAccessed <= 0)
+	return;
     LoopInfo &lpi = gccfg->p->getAnalysis<LoopInfo>(*func);
     Loop *lp = lpi.getLoopFor(lpHeader);
     std::unordered_set<GCCFGBasicBlock *> lpGBBs;

@@ -55,7 +55,8 @@
 
 using namespace llvm;
 
-cl::opt<std::string> spmSize("spm-size", cl::desc("Specify output filename"), cl::value_desc("number of bytes"));
+cl::opt<std::string> spmSizeStr("spm-size", cl::desc("Specify the SPM size"), cl::value_desc("number of bytes"));
+cl::opt<std::string> numRegionsStr("num-regions", cl::desc("Specify the number of output regions"), cl::value_desc("an integer number"));
 
 std::unordered_map <Function *, unsigned long> funcSize;
 
@@ -106,11 +107,12 @@ class CostCalculator {
 
 	CostCalculator(Pass *p, Module &m);
 	void getCallPaths();
-	void calculateCost(unsigned long spmSize);
+	void calculateCost(unsigned long spmSize, unsigned long numRegions);
 
     private:
 	unsigned long getSumOfRegionSizes();
 	unsigned long getMaxRegionSize();
+	unsigned long getNumRegions();
 	void findMerger(Region* &src, Region* &dest);
 	unsigned long calculateMergerCost(Region *r1, Region *r2);
 	void dump();
@@ -389,7 +391,7 @@ void CostCalculator::getCallPaths() {
 }
 
 
-void CostCalculator::calculateCost(unsigned long spmSize) {
+void CostCalculator::calculateCost(unsigned long spmSize, unsigned long numRegions) {
 
     std::ifstream ifs;
     std::ofstream ofs;
@@ -450,21 +452,32 @@ void CostCalculator::calculateCost(unsigned long spmSize) {
     errs() << "\n";
     */
 
+    if (spmSize) {
+	// Try to merge regions until the overall size of regions can fit in the SPM
+	unsigned long maxFuncSize = getMaxRegionSize();
+	unsigned long sumOfFuncSizes = getSumOfRegionSizes();
+	errs() << "The minimum required SPM size = " << maxFuncSize << "\n" ;
+	//errs() << "The average of required SPM sizes = " << (sumOfFuncSizes+maxFuncSize) / 2 << "\n";
+	errs() << "The maxium required SPM size = " << sumOfFuncSizes << "\n" ;
 
-    // Try to merge regions until the overall size of regions can fit in the SPM
-    unsigned long maxFuncSize = getMaxRegionSize();
-    unsigned long sumOfFuncSizes = getSumOfRegionSizes();
-    errs() << "The minimum required SPM size = " << maxFuncSize << "\n" ;
-    errs() << "The average of required SPM sizes = " << (sumOfFuncSizes+maxFuncSize) / 2 << "\n";
-    errs() << "The maxium required SPM size = " << sumOfFuncSizes << "\n" ;
+	if (maxFuncSize > spmSize ) {
+	    errs() << "SPM size is not large enough. The maxium function size = " << maxFuncSize << ", SPM size = " << spmSize << "\n" ;
+	    exit (-1);
+	}
+    } else
+	assert(numRegions);
 
-    if (maxFuncSize > spmSize ) {
-	errs() << "SPM size is not large enough. The maxium function size = " << maxFuncSize << ", SPM size = " << spmSize << "\n" ;
-	exit (-1);
-    }
-
-    while(getSumOfRegionSizes() > spmSize) {
-	errs() << "\nSum of region size: " << getSumOfRegionSizes() << ", spm size: " << spmSize << "\n\n";
+    while(true) {
+	if (spmSize) {
+	    if (getSumOfRegionSizes() <= spmSize)
+		break;
+	    errs() << "\nSum of region size: " << getSumOfRegionSizes() << ", spm size: " << spmSize << "\n\n";
+	} else {
+	    if (getNumRegions() <= numRegions)
+		break;
+	    errs() << "\nCurrent number of regions: " << getNumRegions() << ", target number of regions: " << numRegions << "\n\n";
+	}
+	
 
 	/*
 	errs() << "Regions:\n";
@@ -479,7 +492,7 @@ void CostCalculator::calculateCost(unsigned long spmSize) {
 
 
 	findMerger(src, dest);
-	errs() << "Merge " << src->getDescription() << " and " << dest->getDescription() << "\n\n";
+	errs() << "Merge " << src->getDescription() << " and " << dest->getDescription() << "\n";
 
 
 	Region *region = new Region();
@@ -498,19 +511,20 @@ void CostCalculator::calculateCost(unsigned long spmSize) {
 	regions.insert(region);
 
 
-	/*
 	errs() << "Regions:\n";
 	for (auto ii = regions.begin(), ie = regions.end(); ii != ie; ++ii) {
 	    Region *r = *ii;
 	    errs() << r->getSize() << " "<< r->getDescription() << " ";
 	}
 	errs() << "\n\n";
-	*/
 
     }
 
     errs() << "Calculation finished" << "\n";
-    errs() << "Sum of region size: " << getSumOfRegionSizes() << ", spm size: " << spmSize << "\n";
+    if (spmSize)
+	errs() << "Sum of region size: " << getSumOfRegionSizes() << ", spm size: " << spmSize << "\n";
+    else 
+	errs() << "\nCurrent number of regions: " << getNumRegions() << ", target number of regions: " << numRegions << "\n\n";
     errs() << "Final regions: ";
     for(std::set<Region *>::iterator ii = regions.begin(), ie  = regions.end(); ii != ie; ++ii) {
 	Region *region = *ii;
@@ -761,6 +775,10 @@ unsigned long CostCalculator::getMaxRegionSize() {
     return maxSize;
 }
 
+unsigned long CostCalculator::getNumRegions() {
+    return regions.size();
+}
+
 void CostCalculator::dump() {
     unsigned long regionId = 0;
     std::ofstream ofs;
@@ -789,9 +807,19 @@ namespace {
 	}
 
 	virtual bool runOnModule (Module &mod) {
+	    unsigned long spmSize, numRegions;
 	    // Get the execution trace based on the call graph, starting from the main function
 	    CostCalculator calculator(this, mod);
-	    calculator.calculateCost(std::stoul(spmSize));
+
+	    if (!spmSizeStr.empty())
+		spmSize = std::stoul(spmSizeStr);
+	    else 
+		spmSize = 0;
+	    if (!numRegionsStr.empty())
+		numRegions = std::stoul(numRegionsStr);
+	    else 
+		numRegions = 0;
+	    calculator.calculateCost(spmSize, numRegions);
 	    return false;
 	}
 
