@@ -523,8 +523,16 @@ void CostCalculator::calculateCost(unsigned long spmSize, unsigned long numRegio
     errs() << "Calculation finished" << "\n";
     if (spmSize)
 	errs() << "Sum of region size: " << getSumOfRegionSizes() << ", spm size: " << spmSize << "\n";
-    else 
+    else {
 	errs() << "\nCurrent number of regions: " << getNumRegions() << ", target number of regions: " << numRegions << "\n\n";
+	/*
+	std::ofstream ofs;
+	ofs.open ("_cache-size", std::ofstream::out | std::ofstream::app);
+	auto temp = getSumOfRegionSizes();
+	ofs << numRegions << " " << pow(2.0,ceil(log2((double)temp))) << "\n";
+	ofs.close();
+	*/
+    }
     errs() << "Final regions: ";
     for(std::set<Region *>::iterator ii = regions.begin(), ie  = regions.end(); ii != ie; ++ii) {
 	Region *region = *ii;
